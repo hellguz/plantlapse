@@ -15,7 +15,9 @@ const CONTROLS_HIDE_MS = 3800
 export default function Viewer({ secret }: { secret: string }) {
   const v = useViewer(secret)
   const [windowId, setWindowId] = useState<WindowId>('1d')
-  const [live, setLive] = useState(false)
+  // Live is the default: opening the app should answer "what does it look like
+  // right now" without a tap.
+  const [live, setLive] = useState(true)
   const [playing, setPlaying] = useState(false)
   const [time, setTime] = useState(0)
   const [controls, setControls] = useState(true)
@@ -35,17 +37,19 @@ export default function Viewer({ secret }: { secret: string }) {
 
   /* ------------------------------------------------------------- fetching */
 
+  // The hook records this intent and replays it whenever a peer appears, so
+  // these only need to fire when the user's choice actually changes.
   useEffect(() => {
-    if (live) return
-    v.requestClip(windowId)
-    // requestClip identity is stable; re-fetch only when the range changes.
+    if (live) {
+      v.setLive(true)
+    } else {
+      // Stop the rig publishing before asking for a clip, or it keeps an
+      // unwatched camera track on the wire.
+      v.setLive(false)
+      v.requestClip(windowId)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [windowId, live, v.connection === 'connected'])
-
-  useEffect(() => {
-    v.setLive(live)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [live])
+  }, [windowId, live])
 
   useEffect(() => {
     const el = liveVideo.current
@@ -238,6 +242,7 @@ export default function Viewer({ secret }: { secret: string }) {
           baking={v.status?.baking ?? null}
           hasClip={!!v.clip}
           windowLabel={win.label}
+          onRetry={v.reconnect}
         />
 
         {/* Scrub readout, big while dragging. */}
@@ -419,6 +424,7 @@ function StageOverlay({
   baking,
   hasClip,
   windowLabel,
+  onRetry,
 }: {
   connection: string
   live: boolean
@@ -427,6 +433,7 @@ function StageOverlay({
   baking: { windowId: string; done: number; total: number; phase: string } | null
   hasClip: boolean
   windowLabel: string
+  onRetry: () => void
 }) {
   if (connection === 'searching') {
     return (
@@ -442,12 +449,19 @@ function StageOverlay({
 
   if (connection === 'lost') {
     return (
-      <Centered>
-        <div className="text-sm text-ember-500">Camera went quiet</div>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <div className="relative mb-4 h-1 w-40 overflow-hidden rounded-full bg-white/10 animate-sweep" />
+        <div className="text-sm text-ember-500">Reconnecting…</div>
         <div className="mt-1 max-w-64 text-center text-xs leading-relaxed text-white/35">
-          The rig phone may have slept, lost network, or be behind a NAT that needs a relay.
+          The rig went quiet. Retrying automatically — if it persists, its screen may have locked.
         </div>
-      </Centered>
+        <button
+          onClick={onRetry}
+          className="mt-4 rounded-full border border-white/15 px-4 py-1.5 text-xs text-white/60 hover:text-white"
+        >
+          Retry now
+        </button>
+      </div>
     )
   }
 

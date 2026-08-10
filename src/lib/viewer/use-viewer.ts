@@ -14,8 +14,17 @@ interface ClipLoad {
   percent: number
 }
 
+/** What the viewer currently wants to be watching. */
+interface Intent {
+  live: boolean
+  windowId: WindowId | null
+}
+
 /** No status for this long and we stop pretending the rig is there. */
 const STALE_MS = 12_000
+/** How long to sit disconnected before tearing the room down and rejoining. */
+const REJOIN_AFTER_MS = 9_000
+const TICK_MS = 2_000
 
 export interface ViewerController {
   connection: ConnectionState
@@ -27,6 +36,7 @@ export interface ViewerController {
   setLive: (on: boolean) => void
   setTorch: (on: boolean) => void
   setCamera: (deviceId: string) => void
+  reconnect: () => void
 }
 
 export function useViewer(secret: string): ViewerController {
@@ -35,22 +45,38 @@ export function useViewer(secret: string): ViewerController {
   const [clip, setClip] = useState<LoadedClip | null>(null)
   const [loading, setLoading] = useState<ClipLoad | null>(null)
   const [liveStream, setLiveStream] = useState<MediaStream | null>(null)
+  /** Bumping this tears down the room and joins again from scratch. */
+  const [epoch, setEpoch] = useState(0)
 
   const channelsRef = useRef<Channels | null>(null)
   const pendingHeaderRef = useRef<ClipHeader | null>(null)
   const lastSeenRef = useRef(0)
   const clipUrlRef = useRef<string | null>(null)
+  const intentRef = useRef<Intent>({ live: true, windowId: null })
+
+  const reconnect = useCallback(() => setEpoch((e) => e + 1), [])
 
   useEffect(() => {
-    // The component is keyed by secret upstream, so state starts fresh here
-    // and nothing needs resetting on the way in.
     const ch = createRoom(secret)
     channelsRef.current = ch
+    const joinedAt = Date.now()
+
+    /**
+     * Anything sent before a peer exists goes nowhere — Trystero has no one to
+     * deliver to and reports no error. So the viewer's intent is replayed the
+     * moment a peer appears, rather than fired once at mount and hoped for.
+     */
+    const flushIntent = () => {
+      const { live, windowId } = intentRef.current
+      ch.sendCommand({ type: 'requestStatus' })
+      ch.sendCommand({ type: 'setLive', on: live })
+      if (windowId) ch.sendCommand({ type: 'requestClip', windowId })
+    }
 
     ch.room.onPeerJoin(() => {
       setConnection('connected')
       lastSeenRef.current = Date.now()
-      ch.sendCommand({ type: 'requestStatus' })
+      flushIntent()
     })
 
     ch.room.onPeerLeave(() => {
@@ -91,20 +117,52 @@ export function useViewer(secret: string): ViewerController {
       setLoading(null)
     })
 
+    /**
+     * Relay discovery is best-effort: a join announcement can be missed, and a
+     * connection that survived a backgrounded tab is often already dead. Rather
+     * than leave the user staring at "searching", rejoin the room outright once
+     * we have been out of contact long enough.
+     */
     const watchdog = window.setInterval(() => {
-      if (lastSeenRef.current && Date.now() - lastSeenRef.current > STALE_MS) {
+      const now = Date.now()
+      const seen = lastSeenRef.current
+      const peers = Object.keys(ch.room.getPeers()).length
+
+      if (seen && now - seen > STALE_MS) {
         setConnection((c) => (c === 'connected' ? 'lost' : c))
       }
-    }, 3_000)
+
+      const quietFor = now - (seen || joinedAt)
+      if (!peers && quietFor > REJOIN_AFTER_MS) reconnect()
+    }, TICK_MS)
+
+    // Coming back to the tab is the single likeliest moment to find a dead
+    // connection, so probe immediately instead of waiting for the watchdog.
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return
+      if (Object.keys(ch.room.getPeers()).length) {
+        ch.sendCommand({ type: 'requestStatus' })
+      } else {
+        reconnect()
+      }
+    }
+    document.addEventListener('visibilitychange', onVisible)
 
     return () => {
       clearInterval(watchdog)
+      document.removeEventListener('visibilitychange', onVisible)
       ch.leave()
       channelsRef.current = null
+    }
+  }, [secret, epoch, reconnect])
+
+  // Object URLs outlive the room, so they are released with the component.
+  useEffect(() => {
+    return () => {
       if (clipUrlRef.current) URL.revokeObjectURL(clipUrlRef.current)
       clipUrlRef.current = null
     }
-  }, [secret])
+  }, [])
 
   const send = useCallback((cmd: Parameters<Channels['sendCommand']>[0]) => {
     channelsRef.current?.sendCommand(cmd)
@@ -112,6 +170,7 @@ export function useViewer(secret: string): ViewerController {
 
   const requestClip = useCallback(
     (id: WindowId, force = false) => {
+      intentRef.current = { live: false, windowId: id }
       setLoading({ windowId: id, percent: 0 })
       send({ type: 'requestClip', windowId: id, force })
     },
@@ -120,6 +179,7 @@ export function useViewer(secret: string): ViewerController {
 
   const setLive = useCallback(
     (on: boolean) => {
+      intentRef.current = { ...intentRef.current, live: on }
       if (!on) setLiveStream(null)
       send({ type: 'setLive', on })
     },
@@ -132,5 +192,16 @@ export function useViewer(secret: string): ViewerController {
     [send],
   )
 
-  return { connection, status, clip, loading, liveStream, requestClip, setLive, setTorch, setCamera }
+  return {
+    connection,
+    status,
+    clip,
+    loading,
+    liveStream,
+    requestClip,
+    setLive,
+    setTorch,
+    setCamera,
+    reconnect,
+  }
 }

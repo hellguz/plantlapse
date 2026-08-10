@@ -132,6 +132,19 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
     void el.play().catch(() => {})
   })
 
+  /**
+   * A viewer can ask for live before the camera has finished opening, or while
+   * a camera switch is in flight. Re-publish to everyone who asked whenever the
+   * stream changes, so the request is never simply lost.
+   */
+  useEffect(() => {
+    const ch = channelsRef.current
+    if (!ch || !stream) return
+    for (const peerId of livePeersRef.current) {
+      void ch.room.addStream(stream, peerId)
+    }
+  }, [stream])
+
   useEffect(() => {
     const wake = wakeRef.current
     return () => {
