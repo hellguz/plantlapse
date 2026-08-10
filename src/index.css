@@ -1,0 +1,136 @@
+@import 'tailwindcss';
+
+/* ---------------------------------------------------------------------------
+   Plantlapse design tokens.
+   Single dark surface, one accent. Deliberately not shadcn's default palette.
+--------------------------------------------------------------------------- */
+@theme {
+  --color-ink-950: #08080a;
+  --color-ink-900: #0a0a0b;
+  --color-ink-850: #101013;
+  --color-ink-800: #17171b;
+  --color-ink-700: #232329;
+  --color-ink-600: #33333c;
+  --color-ink-500: #4d4d59;
+  --color-ink-400: #6f6f7d;
+  --color-ink-300: #9a9aa7;
+  --color-ink-200: #c6c6ce;
+  --color-ink-100: #e8e8ec;
+
+  --color-leaf-500: #4ade80;
+  --color-leaf-400: #6ee7a0;
+  --color-leaf-600: #22c55e;
+  --color-leaf-900: #0d2417;
+
+  --color-ember-500: #f5a524;
+  --color-rose-500: #f5556d;
+
+  --radius-app: 1.25rem;
+
+  --font-sans:
+    'Inter var', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'SF Mono', 'JetBrains Mono', 'Roboto Mono', ui-monospace, monospace;
+
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@layer base {
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  html {
+    background: var(--color-ink-950);
+    color-scheme: dark;
+    /* Avoid rubber-band scroll fighting the scrubber gesture. */
+    overscroll-behavior: none;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-ink-950);
+    color: var(--color-ink-100);
+    font-family: var(--font-sans);
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'ss01';
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    touch-action: manipulation;
+  }
+
+  /* Time readouts must not jitter as digits change. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-family: var(--font-mono);
+    letter-spacing: -0.01em;
+  }
+
+  ::selection {
+    background: var(--color-leaf-900);
+    color: var(--color-leaf-400);
+  }
+
+  ::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+}
+
+@utility glass {
+  background: color-mix(in oklab, var(--color-ink-850) 78%, transparent);
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  border: 1px solid color-mix(in oklab, white 7%, transparent);
+}
+
+@utility safe-b {
+  padding-bottom: max(env(safe-area-inset-bottom), 0.5rem);
+}
+
+@utility safe-t {
+  padding-top: max(env(safe-area-inset-top), 0.5rem);
+}
+
+/* Breathing dot used by the armed/black-screen state. */
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 0.18;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(1.35);
+  }
+}
+
+.animate-pulse-soft {
+  animation: pulse-soft 3.2s var(--ease-spring) infinite;
+}
+
+@keyframes sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+.animate-sweep::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklab, var(--color-leaf-500) 22%, transparent),
+    transparent
+  );
+  animation: sweep 1.6s ease-in-out infinite;
+}
