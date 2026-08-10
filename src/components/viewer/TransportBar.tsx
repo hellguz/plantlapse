@@ -24,8 +24,8 @@ export function TransportBar({
   disabled?: boolean
 }) {
   return (
-    <div className="flex items-center justify-between gap-3">
-      <div className="tnum w-24 text-[11px] text-ink-400">
+    <div className="flex items-center justify-between gap-1 sm:gap-3">
+      <div className="tnum w-16 shrink-0 text-[11px] text-ink-400 sm:w-24">
         {formatClock(currentTime)}
         <span className="text-ink-600"> / {formatClock(duration)}</span>
       </div>
@@ -70,7 +70,7 @@ export function TransportBar({
         </Button>
       </div>
 
-      <div className="flex w-24 justify-end">
+      <div className="flex w-16 shrink-0 justify-end sm:w-24">
         {downloadUrl ? (
           <a
             href={downloadUrl}

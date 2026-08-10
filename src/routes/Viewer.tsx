@@ -312,7 +312,10 @@ export default function Viewer({ secret }: { secret: string }) {
           >
             {/* Ranges. LIVE sits at the right end because it *is* the right
                 end of the timeline — the newest thing there is. */}
-            <div className="-mx-1 mb-3 flex items-center gap-1 overflow-x-auto px-1 pb-1">
+            {/* Wraps rather than scrolls: a hidden horizontal scroll area
+                competes with the scrub gesture and buries ranges off-screen
+                on narrow phones. Every range stays reachable at any width. */}
+            <div className="mb-3 flex flex-wrap items-center justify-center gap-1">
               {WINDOWS.map((w) => (
                 <Chip
                   key={w.id}
@@ -327,9 +330,9 @@ export default function Viewer({ secret }: { secret: string }) {
                   {w.label}
                 </Chip>
               ))}
-              <div className="mx-1 h-4 w-px shrink-0 bg-white/10" />
               <Chip
                 active={live}
+                className="ml-1"
                 onClick={() => {
                   setLive((l) => !l)
                   showControls()
