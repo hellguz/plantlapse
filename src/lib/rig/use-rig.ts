@@ -64,6 +64,7 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
   const [bake, setBake] = useState<BakeProgress | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [cameraReady, setCameraReady] = useState(false)
+  const [stream, setStream] = useState<MediaStream | null>(null)
 
   const streamRef = useRef<MediaStream | null>(null)
   const trackRef = useRef<MediaStreamTrack | null>(null)
@@ -100,10 +101,7 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
         setTorchAvailable(res.torchAvailable)
         setTorchOn(false)
         setCaptureSize({ width: res.width, height: res.height })
-        if (videoRef.current) {
-          videoRef.current.srcObject = res.stream
-          await videoRef.current.play().catch(() => {})
-        }
+        setStream(res.stream)
         setCameras(await listCameras())
         if (!settingsRef.current.deviceId && res.deviceId) {
           updateSettings({ deviceId: res.deviceId })
@@ -120,6 +118,19 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
       cancelled = true
     }
   }, [settings.deviceId, videoRef])
+
+  /**
+   * Bind the stream to whatever element is currently mounted. Doing this in
+   * its own effect (rather than inline at open time) means the preview
+   * survives the element being remounted — e.g. on the way back from the
+   * black armed screen, which previously left it showing nothing.
+   */
+  useEffect(() => {
+    const el = videoRef.current
+    if (!el || !stream || el.srcObject === stream) return
+    el.srcObject = stream
+    void el.play().catch(() => {})
+  })
 
   useEffect(() => {
     const wake = wakeRef.current

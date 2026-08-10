@@ -49,19 +49,20 @@ export default function Rig() {
     rig.selectCamera(rig.cameras[(i + 1) % rig.cameras.length].deviceId)
   }
 
-  if (blackout) {
-    return (
-      <BlackScreen
-        frames={rig.stats?.frames ?? 0}
-        lastFrameAt={rig.stats?.newestT ?? null}
-        peers={rig.peers.length}
-        onWake={() => setShowControls(true)}
-      />
-    )
-  }
-
+  // The black screen is an overlay, never a replacement: unmounting this tree
+  // would tear down the <video> the capture engine is reading from and leave
+  // the preview blank on the way back.
   return (
-    <div className="flex min-h-dvh flex-col bg-ink-950">
+    <>
+      {blackout && (
+        <BlackScreen
+          frames={rig.stats?.frames ?? 0}
+          lastFrameAt={rig.stats?.newestT ?? null}
+          peers={rig.peers.length}
+          onWake={() => setShowControls(true)}
+        />
+      )}
+      <div className="flex min-h-dvh flex-col bg-ink-950">
       {/* ------------------------------------------------------------ header */}
       <header className="safe-t flex items-center justify-between px-4 pb-3">
         <button
@@ -348,6 +349,7 @@ export default function Rig() {
           Erase archive
         </Button>
       </Sheet>
-    </div>
+      </div>
+    </>
   )
 }
