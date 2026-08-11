@@ -27,6 +27,8 @@ browser warning once on each device.
 2. *Pair viewer* → scan the QR from **phone 2**, or type the code on its home screen.
 3. *Start recording*. The screen goes black; drop system brightness to zero.
 4. On phone 2, pick a range — or `LIVE`, which is just the right-hand end of the timeline.
+5. Drag anywhere on the picture, or on the strip, to scrub. From `LIVE` that is a peek
+   back over the selected range; release and it snaps to the present.
 
 ## How it works
 
@@ -58,6 +60,18 @@ range opens instantly.
 
 Windows of 6 h and up land at ~3 minutes at 60 fps. Shorter ones are deliberately
 shorter — an hour of plant is not three minutes of content.
+
+Seeks are coalesced: one in flight, the newest target queued behind it. Assigning
+`currentTime` again cancels the seek already running, so a drag firing 60 of them a
+second used to leave the picture frozen until the finger stopped.
+
+**Rewinding out of live.** A clip cannot serve this: it is megabytes to download, and it
+ends wherever the last bake ended, so it can never show you five minutes ago. Dragging on
+the live view instead pulls single archive JPEGs straight off the rig — one datachannel
+round trip each (~100 kB, no encode), snapped to the ladder grid so dragging back over
+your own path is served from cache. The camera keeps publishing underneath the whole
+time, which is why letting go snaps back to the present with nothing to reconnect. How
+far back a full-width drag reaches is whichever range the chips last had selected.
 
 **Transport.** Trystero over public Nostr relays for signalling, then direct WebRTC,
 end-to-end encrypted. The pairing secret lives in the URL fragment and is the room id.

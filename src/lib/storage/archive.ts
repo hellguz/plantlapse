@@ -7,6 +7,7 @@ import {
 } from '@/lib/ladder'
 import {
   deleteFrames,
+  getFrame,
   getFrameRange,
   getMeta,
   getNewestFrame,
@@ -230,6 +231,34 @@ export async function luminanceProfile(fromT: number, toT: number, buckets = 240
     out[i] = counts[i] ? Math.round(sums[i] / counts[i]) : 0
   }
   return out
+}
+
+/**
+ * The single frame nearest an instant, at a given ladder level's spacing.
+ *
+ * Snapping to the level grid before looking up is the whole point: a viewer
+ * dragging across a 1D window asks for the same handful of slots over and over,
+ * so its cache does the work and the rig is only touched for genuinely new
+ * positions. Capture lands on the grid, so the snapped slot is usually a direct
+ * hit; the range scan is the gap case (thinned levels, tab reaped, cold start).
+ */
+export async function nearestFrame(t: number, level = 0): Promise<FrameRecord | null> {
+  const step = 2 ** Math.max(0, Math.min(MAX_LEVEL, level))
+  const snapped = Math.round(slotForTime(t) / step) * step
+
+  const exact = await getFrame(snapped)
+  if (exact) return exact
+
+  // Widen by a few of this level's steps, but never scan an unbounded span.
+  const radius = Math.min(step * 4, 4096)
+  const near = await getFrameRange(snapped - radius, snapped + radius)
+  if (!near.length) return null
+
+  const onGrid = near.filter((r) => r.slot % step === 0)
+  const pool = onGrid.length ? onGrid : near
+  return pool.reduce((best, r) =>
+    Math.abs(r.slot - snapped) < Math.abs(best.slot - snapped) ? r : best,
+  )
 }
 
 /** Frames available for a window, at the spacing that window bakes at. */

@@ -8,6 +8,10 @@ export const CH = {
   command: 'cmd',
   clipMeta: 'cmeta',
   clipData: 'cdata',
+  frameReq: 'freq',
+  frameRes: 'fres',
+  lumReq: 'lreq',
+  lumRes: 'lres',
 } as const
 
 interface CameraDescriptor {
@@ -83,3 +87,49 @@ export interface ClipHeader {
 }
 
 export type ConnectionState = 'idle' | 'searching' | 'connected' | 'lost'
+
+/* -------------------------------------------------------------------------- */
+/* Single-frame scrubbing                                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A baked clip is the right vehicle for *playback*, and the wrong one for the
+ * first second of a drag: it costs megabytes before a single pixel moves, and
+ * it can never show the last few minutes, because the bake that produced it ran
+ * before they happened.
+ *
+ * So dragging pulls one archive JPEG at a time straight off the rig — ~100 KB
+ * and a datachannel round trip, no encode, nothing to wait for, current to
+ * within one capture interval. The clip still does what it is good at.
+ */
+export interface FrameRequest {
+  /** Monotonic per viewer; echoed back so late replies can be discarded. */
+  seq: number
+  /** Wall-clock instant wanted. The rig answers with the nearest frame it has. */
+  t: number
+  /**
+   * Coarsest acceptable spacing, as a ladder level. Snapping requests to the
+   * level's grid is what makes a slow drag back over its own path free.
+   */
+  level: number
+}
+
+/** Rides alongside the JPEG bytes as Trystero action metadata. */
+export interface FrameMeta {
+  seq: number
+  /** Timestamp of the frame actually sent; 0 when the archive had nothing. */
+  t: number
+}
+
+export interface LumRequest {
+  fromT: number
+  toT: number
+  buckets: number
+}
+
+/** The day/night strip for a span the viewer has no clip header for. */
+export interface LumProfile {
+  fromT: number
+  toT: number
+  values: number[]
+}

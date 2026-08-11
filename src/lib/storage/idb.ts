@@ -84,6 +84,14 @@ export function deleteFrames(slots: number[]) {
   )
 }
 
+export function getFrame(slot: number): Promise<FrameRecord | undefined> {
+  return tx<FrameRecord | undefined>(
+    FRAME_STORE,
+    'readonly',
+    (s) => s.get(slot) as IDBRequest<FrameRecord | undefined>,
+  )
+}
+
 /** Frames in [fromSlot, toSlot], ascending. */
 export function getFrameRange(fromSlot: number, toSlot: number): Promise<FrameRecord[]> {
   if (toSlot < fromSlot) return Promise.resolve([])

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createRoom, type Channels } from '@/lib/net/room'
-import type { ClipHeader, ConnectionState, RigStatus } from '@/lib/net/protocol'
+import type { ClipHeader, ConnectionState, LumProfile, RigStatus } from '@/lib/net/protocol'
 import type { WindowId } from '@/lib/ladder'
+import { FrameScrubber, type FramePreview } from './frame-scrubber'
 
 interface LoadedClip {
   header: ClipHeader
@@ -32,7 +33,14 @@ export interface ViewerController {
   clip: LoadedClip | null
   loading: ClipLoad | null
   liveStream: MediaStream | null
+  /** Single archive frame currently being previewed, if any. */
+  preview: FramePreview | null
+  /** Day/night strip for a span with no clip header behind it. */
+  lumProfile: LumProfile | null
   requestClip: (id: WindowId, force?: boolean) => void
+  requestFrame: (t: number, level: number) => void
+  clearPreview: () => void
+  requestLuminance: (fromT: number, toT: number, buckets?: number) => void
   setLive: (on: boolean) => void
   setTorch: (on: boolean) => void
   setCamera: (deviceId: string) => void
@@ -45,6 +53,8 @@ export function useViewer(secret: string): ViewerController {
   const [clip, setClip] = useState<LoadedClip | null>(null)
   const [loading, setLoading] = useState<ClipLoad | null>(null)
   const [liveStream, setLiveStream] = useState<MediaStream | null>(null)
+  const [preview, setPreview] = useState<FramePreview | null>(null)
+  const [lumProfile, setLumProfile] = useState<LumProfile | null>(null)
   /** Bumping this tears down the room and joins again from scratch. */
   const [epoch, setEpoch] = useState(0)
 
@@ -55,6 +65,14 @@ export function useViewer(secret: string): ViewerController {
   const intentRef = useRef<Intent>({ live: true, windowId: null })
 
   const reconnect = useCallback(() => setEpoch((e) => e + 1), [])
+
+  /**
+   * Outlives the room deliberately: the frame cache is the difference between
+   * a reconnect being invisible and every position on the strip having to be
+   * fetched all over again. The room attaches itself as transport on join.
+   */
+  const [scrubber] = useState(() => new FrameScrubber(setPreview))
+  useEffect(() => () => scrubber.dispose(), [scrubber])
 
   useEffect(() => {
     const ch = createRoom(secret)
@@ -104,6 +122,10 @@ export function useViewer(secret: string): ViewerController {
       if (h) setLoading({ windowId: h.windowId, percent: pct })
     })
 
+    scrubber.attach((req) => ch.sendFrameRequest(req))
+    ch.onFrame((bytes, meta) => scrubber.receive(bytes, meta))
+    ch.onLumProfile((p) => setLumProfile(p))
+
     ch.onClipData((data) => {
       const header = pendingHeaderRef.current
       if (!header) return
@@ -151,10 +173,11 @@ export function useViewer(secret: string): ViewerController {
     return () => {
       clearInterval(watchdog)
       document.removeEventListener('visibilitychange', onVisible)
+      scrubber.detach()
       ch.leave()
       channelsRef.current = null
     }
-  }, [secret, epoch, reconnect])
+  }, [secret, epoch, reconnect, scrubber])
 
   // Object URLs outlive the room, so they are released with the component.
   useEffect(() => {
@@ -186,6 +209,17 @@ export function useViewer(secret: string): ViewerController {
     [send],
   )
 
+  const requestFrame = useCallback(
+    (t: number, level: number) => scrubber.request(t, level),
+    [scrubber],
+  )
+
+  const clearPreview = useCallback(() => scrubber.clear(), [scrubber])
+
+  const requestLuminance = useCallback((fromT: number, toT: number, buckets = 240) => {
+    channelsRef.current?.sendLumRequest({ fromT, toT, buckets })
+  }, [])
+
   const setTorch = useCallback((on: boolean) => send({ type: 'setTorch', on }), [send])
   const setCamera = useCallback(
     (deviceId: string) => send({ type: 'setCamera', deviceId }),
@@ -198,7 +232,12 @@ export function useViewer(secret: string): ViewerController {
     clip,
     loading,
     liveStream,
+    preview,
+    lumProfile,
     requestClip,
+    requestFrame,
+    clearPreview,
+    requestLuminance,
     setLive,
     setTorch,
     setCamera,

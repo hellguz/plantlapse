@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { ChevronLeft, Radio, SlidersHorizontal } from 'lucide-react'
 import { Chip, StatusDot } from '@/components/ui/primitives'
@@ -6,14 +6,33 @@ import { Timeline } from '@/components/viewer/Timeline'
 import { TransportBar } from '@/components/viewer/TransportBar'
 import { CameraSheet } from '@/components/viewer/CameraSheet'
 import { useViewer } from '@/lib/viewer/use-viewer'
-import { WINDOWS, WINDOW_BY_ID, type WindowId } from '@/lib/ladder'
+import { SeekPump } from '@/lib/viewer/seek-pump'
+import type { FramePreview } from '@/lib/viewer/frame-scrubber'
+import { TARGET_FPS, WINDOWS, WINDOW_BY_ID, type WindowId } from '@/lib/ladder'
 import { navigate } from '@/lib/hash-route'
 import { clamp, cn, formatSpan, formatStamp } from '@/lib/utils'
 
 const CONTROLS_HIDE_MS = 3800
+/** Buckets in the day/night strip; matches the profile the rig returns. */
+const LUM_BUCKETS = 240
+
+interface StageGesture {
+  down: boolean
+  startX: number
+  /** Clip seconds in 'clip' mode, wall-clock ms in 'frames' mode. */
+  startT: number
+  moved: boolean
+  lastTap: number
+  mode: 'clip' | 'frames'
+  /** Range frozen at drag start, so the origin cannot slide mid-gesture. */
+  fromT: number
+  toT: number
+}
 
 export default function Viewer({ secret }: { secret: string }) {
   const v = useViewer(secret)
+  const { requestFrame, clearPreview, requestLuminance } = v
+
   const [windowId, setWindowId] = useState<WindowId>('1d')
   // Live is the default: opening the app should answer "what does it look like
   // right now" without a tap.
@@ -22,18 +41,69 @@ export default function Viewer({ secret }: { secret: string }) {
   const [time, setTime] = useState(0)
   const [controls, setControls] = useState(true)
   const [sheetOpen, setSheetOpen] = useState(false)
-  const [scrubbing, setScrubbing] = useState(false)
+  /**
+   * Wall-clock instant being previewed out of the archive, or null for "the
+   * present". While live this is a peek and nothing more — the camera keeps
+   * publishing throughout, and letting go of the drag drops straight back to
+   * it.
+   */
+  const [rewindT, setRewindT] = useState<number | null>(null)
 
   const clipVideo = useRef<HTMLVideoElement>(null)
   const liveVideo = useRef<HTMLVideoElement>(null)
   const hideTimer = useRef<number | null>(null)
-  const gesture = useRef({ down: false, startX: 0, startT: 0, moved: false, lastTap: 0 })
+  const gesture = useRef<StageGesture>({
+    down: false,
+    startX: 0,
+    startT: 0,
+    moved: false,
+    lastTap: 0,
+    mode: 'clip',
+    fromT: 0,
+    toT: 0,
+  })
 
-  // Fallback bounds for the timeline before any clip header has arrived.
+  const [pump] = useState(() => new SeekPump())
+
+  // Fallback bounds for the timeline before any status has arrived.
   const [mountedAt] = useState(() => Date.now())
 
   const header = v.clip?.header
   const duration = header?.durationS ?? 0
+  const win = WINDOW_BY_ID[windowId]
+
+  /** Is the clip we hold the one the chips say we are watching? */
+  const clipReady = !live && !!header && header.windowId === windowId && duration > 0
+
+  /**
+   * The rig's newest frame is a truer "now" than the wall clock: it is the
+   * edge the archive actually reaches, so the strip never offers footage that
+   * does not exist.
+   */
+  const scrubToT = v.status?.newestT ?? mountedAt
+  const scrubFromT = Math.max(scrubToT - win.spanMs, v.status?.oldestT ?? scrubToT - win.spanMs)
+  const scrubSpan = Math.max(0, scrubToT - scrubFromT)
+
+  /**
+   * Single-frame scrubbing exists for one job: peeking back out of the live
+   * view without dropping it. A range whose clip is still baking gets the
+   * progress bar, not a stand-in picture.
+   */
+  const canRewind = live && !!v.status?.newestT && scrubSpan > 0
+
+  /**
+   * A stale rewind position must not outlive the live view it belongs to, so
+   * the state is filtered rather than reset — resetting would mean a setState
+   * in an effect and a second render for something that is purely derived.
+   */
+  const activeRewindT = live ? rewindT : null
+
+  // Read inside intervals, which would otherwise close over the status as it
+  // stood when they were armed.
+  const statusRef = useRef(v.status)
+  useEffect(() => {
+    statusRef.current = v.status
+  })
 
   /* ------------------------------------------------------------- fetching */
 
@@ -59,11 +129,39 @@ export default function Viewer({ secret }: { secret: string }) {
     }
   }, [v.liveStream])
 
+  /**
+   * The day/night strip normally rides along with a clip header. Live has no
+   * header, so ask for the profile on its own — it is a few hundred bytes and
+   * it is the whole reason the rewind is navigable.
+   */
+  useEffect(() => {
+    if (!live || v.connection !== 'connected') return
+    const ask = () => {
+      const st = statusRef.current
+      const to = st?.newestT ?? Date.now()
+      const from = Math.max(to - win.spanMs, st?.oldestT ?? to - win.spanMs)
+      requestLuminance(from, to, LUM_BUCKETS)
+    }
+    ask()
+    // Refetch once the newest bucket could plausibly have changed. Building
+    // the profile means a range scan of the archive, and six months of it does
+    // not repaint every thirty seconds.
+    const every = clamp(win.spanMs / LUM_BUCKETS, 30_000, 600_000)
+    const id = window.setInterval(ask, every)
+    return () => clearInterval(id)
+  }, [live, v.connection, win.spanMs, requestLuminance])
+
   /* ------------------------------------------------------------- playback */
+
+  useEffect(() => {
+    pump.attach(clipVideo.current)
+    return () => pump.attach(null)
+  }, [pump])
 
   useEffect(() => {
     const el = clipVideo.current
     if (!el || !v.clip) return
+    pump.reset()
     el.src = v.clip.url
     el.currentTime = 0
     setTime(0)
@@ -71,12 +169,12 @@ export default function Viewer({ secret }: { secret: string }) {
       () => setPlaying(true),
       () => setPlaying(false),
     )
-  }, [v.clip])
+  }, [v.clip, pump])
 
   // A rAF loop rather than `timeupdate`: the latter fires ~4x/s and makes the
   // playhead visibly stutter against 60fps footage.
   useEffect(() => {
-    if (!playing || live) return
+    if (!playing || !clipReady) return
     let raf = 0
     const loop = () => {
       const el = clipVideo.current
@@ -85,7 +183,7 @@ export default function Viewer({ secret }: { secret: string }) {
     }
     raf = requestAnimationFrame(loop)
     return () => cancelAnimationFrame(raf)
-  }, [playing, live])
+  }, [playing, clipReady])
 
   const showControls = useCallback(() => {
     setControls(true)
@@ -103,19 +201,39 @@ export default function Viewer({ secret }: { secret: string }) {
     }
   }, [])
 
+  /* -------------------------------------------------------------- seeking */
+
   const seek = useCallback(
     (seconds: number) => {
-      const el = clipVideo.current
-      if (!el || !duration) return
-      el.currentTime = clamp(seconds, 0, duration - 0.05)
-      setTime(el.currentTime)
+      if (!duration) return
+      const t = clamp(seconds, 0, duration - 0.05)
+      // The readout and playhead follow the finger at 60fps whatever the
+      // decoder manages; the pump catches the picture up as fast as it can.
+      setTime(t)
+      pump.seek(t)
     },
-    [duration],
+    [duration, pump],
   )
+
+  /** Preview a wall-clock instant by pulling that single frame off the rig. */
+  const scrubToTime = useCallback(
+    (t: number) => {
+      const clamped = clamp(t, scrubFromT, scrubToT)
+      setRewindT(clamped)
+      requestFrame(clamped, win.level)
+    },
+    [scrubFromT, scrubToT, win.level, requestFrame],
+  )
+
+  /** Let go and the rewind evaporates — live was never actually interrupted. */
+  const endRewind = useCallback(() => {
+    setRewindT(null)
+    clearPreview()
+  }, [clearPreview])
 
   const togglePlay = useCallback(() => {
     const el = clipVideo.current
-    if (!el) return
+    if (!el || !clipReady) return
     if (el.paused) {
       void el.play()
       setPlaying(true)
@@ -124,53 +242,95 @@ export default function Viewer({ secret }: { secret: string }) {
       setPlaying(false)
     }
     showControls()
-  }, [showControls])
+  }, [clipReady, showControls])
 
   /* -------------------------------------------------------------- readout */
 
   const stampMs = useMemo(() => {
+    if (!clipReady) return activeRewindT ?? v.preview?.t ?? v.status?.newestT ?? null
     if (!header?.timestamps.length) return null
-    const i = clamp(Math.round(time * 60), 0, header.timestamps.length - 1)
+    const i = clamp(Math.round(time * TARGET_FPS), 0, header.timestamps.length - 1)
     return header.timestamps[i]
-  }, [header, time])
+  }, [clipReady, activeRewindT, v.preview, v.status, header, time])
 
-  const luminance = header?.luminance ?? []
+  /**
+   * Only trust a fetched profile that covers roughly the span now on screen —
+   * otherwise a stale reply for the previous range paints the wrong terrain
+   * under the finger for a moment after switching.
+   */
+  const lumValues = useMemo(() => {
+    if (clipReady) return header?.luminance ?? []
+    const p = v.lumProfile
+    if (!live || !p) return []
+    const drift = Math.abs(p.toT - p.fromT - scrubSpan)
+    return drift < Math.max(win.spanMs * 0.2, 60_000) ? p.values : []
+  }, [clipReady, live, header, v.lumProfile, scrubSpan, win.spanMs])
+
+  const previewVisible = !!v.preview && activeRewindT !== null
 
   /* ------------------------------------------------------------- gestures */
 
   const onPointerDown = (e: React.PointerEvent) => {
-    if (live || !duration) return
-    gesture.current = {
-      down: true,
-      startX: e.clientX,
-      startT: clipVideo.current?.currentTime ?? 0,
-      moved: false,
-      lastTap: gesture.current.lastTap,
+    const g = gesture.current
+    g.mode = clipReady ? 'clip' : 'frames'
+    if (g.mode === 'clip' ? !duration : !canRewind) return
+
+    g.down = true
+    g.startX = e.clientX
+    g.moved = false
+    if (g.mode === 'clip') {
+      g.startT = clipVideo.current?.currentTime ?? 0
+    } else {
+      // Freeze the window for the duration of the drag. Status ticks every two
+      // seconds, and a moving origin would slide the footage under the finger.
+      g.fromT = scrubFromT
+      g.toT = scrubToT
+      g.startT = activeRewindT ?? scrubToT
     }
     ;(e.target as Element).setPointerCapture?.(e.pointerId)
   }
 
   const onPointerMove = (e: React.PointerEvent) => {
     const g = gesture.current
-    if (!g.down || live || !duration) return
+    if (!g.down) return
     const dx = e.clientX - g.startX
-    if (Math.abs(dx) < 6 && !g.moved) return
+    if (!g.moved && Math.abs(dx) < 6) return
     if (!g.moved) {
       g.moved = true
-      clipVideo.current?.pause()
-      setPlaying(false)
-      setScrubbing(true)
       showControls()
+      if (g.mode === 'clip') {
+        clipVideo.current?.pause()
+        setPlaying(false)
+      }
     }
-    // Full width of the surface sweeps the whole clip.
-    seek(g.startT + (dx / window.innerWidth) * duration)
+    // Full width of the surface sweeps the whole range, either way.
+    const fraction = dx / window.innerWidth
+    if (g.mode === 'clip') {
+      seek(g.startT + fraction * duration)
+    } else {
+      scrubToTime(g.startT + fraction * (g.toT - g.fromT))
+    }
   }
 
   const onPointerUp = (e: React.PointerEvent) => {
     const g = gesture.current
+    if (!g.down) return
     g.down = false
-    setScrubbing(false)
-    if (g.moved) return
+
+    if (g.moved) {
+      if (g.mode === 'frames' && live) endRewind()
+      return
+    }
+
+    // Without a clip there is no ±10s to disambiguate, so a tap can act at once.
+    if (g.mode === 'frames') {
+      setControls((c) => {
+        if (c) return false
+        showControls()
+        return true
+      })
+      return
+    }
 
     const now = Date.now()
     if (now - g.lastTap < 280) {
@@ -193,11 +353,18 @@ export default function Viewer({ secret }: { secret: string }) {
     }, 280)
   }
 
+  const onPointerCancel = () => {
+    const g = gesture.current
+    if (!g.down) return
+    g.down = false
+    if (g.mode === 'frames' && live) endRewind()
+  }
+
   /* ----------------------------------------------------------------- view */
 
-  const win = WINDOW_BY_ID[windowId]
   const historyMs =
     v.status?.oldestT && v.status?.newestT ? v.status.newestT - v.status.oldestT : 0
+  const rewinding = live && activeRewindT !== null
 
   return (
     <div className="relative flex h-dvh flex-col overflow-hidden bg-black">
@@ -207,10 +374,7 @@ export default function Viewer({ secret }: { secret: string }) {
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerCancel={() => {
-          gesture.current.down = false
-          setScrubbing(false)
-        }}
+        onPointerCancel={onPointerCancel}
       >
         <video
           ref={clipVideo}
@@ -219,7 +383,7 @@ export default function Viewer({ secret }: { secret: string }) {
           loop
           className={cn(
             'absolute inset-0 size-full object-contain transition-opacity duration-300',
-            live ? 'opacity-0' : 'opacity-100',
+            clipReady ? 'opacity-100' : 'opacity-0',
           )}
           onEnded={() => setPlaying(false)}
         />
@@ -234,32 +398,25 @@ export default function Viewer({ secret }: { secret: string }) {
           )}
         />
 
+        {/* Single archive frames, painted over whatever is behind. No fade on
+            the way in: it has to feel like the drag is moving the picture. */}
+        <FrameSurface preview={v.preview} visible={previewVisible} />
+
         <StageOverlay
           connection={v.connection}
           live={live}
           liveReady={!!v.liveStream}
           loading={v.loading}
           baking={v.status?.baking ?? null}
-          hasClip={!!v.clip}
+          hasClip={clipReady}
+          previewing={previewVisible}
           windowLabel={win.label}
           onRetry={v.reconnect}
         />
 
-        {/* Scrub readout, big while dragging. */}
-        <AnimatePresence>
-          {scrubbing && stampMs && (
-            <motion.div
-              initial={{ opacity: 0, scale: 0.96 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.96 }}
-              className="pointer-events-none absolute inset-x-0 top-1/2 -translate-y-1/2 text-center"
-            >
-              <div className="tnum inline-block rounded-2xl bg-black/60 px-5 py-3 text-xl font-semibold backdrop-blur">
-                {formatStamp(stampMs)}
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        {/* No date card across the middle while dragging. Baked clips carry
+            the stamp burned into the frame, live rewind is about watching the
+            plant move, and the readout under the strip covers both. */}
 
         {/* --------------------------------------------------------- header */}
         <AnimatePresence>
@@ -329,6 +486,7 @@ export default function Viewer({ secret }: { secret: string }) {
                   onClick={() => {
                     setLive(false)
                     setWindowId(w.id)
+                    endRewind()
                     showControls()
                   }}
                 >
@@ -340,6 +498,7 @@ export default function Viewer({ secret }: { secret: string }) {
                 className="ml-1"
                 onClick={() => {
                   setLive((l) => !l)
+                  endRewind()
                   showControls()
                 }}
               >
@@ -351,36 +510,55 @@ export default function Viewer({ secret }: { secret: string }) {
             </div>
 
             <Timeline
-              luminance={luminance}
-              progress={duration ? time / duration : 0}
-              fromT={header?.fromT ?? mountedAt - win.spanMs}
-              toT={header?.toT ?? mountedAt}
-              disabled={live || !duration}
+              luminance={lumValues}
+              progress={
+                clipReady
+                  ? duration
+                    ? time / duration
+                    : 0
+                  : scrubSpan
+                    ? ((activeRewindT ?? scrubToT) - scrubFromT) / scrubSpan
+                    : 1
+              }
+              fromT={header && clipReady ? header.fromT : scrubFromT}
+              toT={header && clipReady ? header.toT : scrubToT}
+              disabled={clipReady ? !duration : !canRewind}
               onScrub={(p) => {
-                seek(p * duration)
-                setScrubbing(true)
-                clipVideo.current?.pause()
-                setPlaying(false)
+                if (clipReady) {
+                  seek(p * duration)
+                  clipVideo.current?.pause()
+                  setPlaying(false)
+                } else {
+                  scrubToTime(scrubFromT + p * scrubSpan)
+                }
                 showControls()
               }}
-              onScrubEnd={() => setScrubbing(false)}
+              onScrubEnd={() => {
+                if (!clipReady && live) endRewind()
+              }}
             />
 
-            <div className="tnum mt-2 mb-1 flex items-center justify-between text-[11px] text-ink-400">
-              <span>{stampMs ? formatStamp(stampMs) : '—'}</span>
+            {/* The timestamp is the readout that matters — where you are in
+                six months of plant — so it gets the accent, not the chrome. */}
+            <div className="tnum mt-2 mb-1 flex items-center justify-between gap-2 text-[11px]">
+              <span className="text-[12px] font-semibold text-leaf-500">
+                {stampMs ? formatStamp(stampMs) : '—'}
+              </span>
               <span className="text-ink-500">
-                {live
-                  ? 'realtime'
-                  : header
-                    ? `${formatSpan(header.toT - header.fromT)} in ${Math.round(header.durationS)}s`
-                    : ''}
+                {rewinding
+                  ? `${formatSpan(scrubToT - (activeRewindT ?? scrubToT))} back`
+                  : live
+                    ? 'realtime'
+                    : clipReady && header
+                      ? `${formatSpan(header.toT - header.fromT)} in ${Math.round(header.durationS)}s`
+                      : ''}
               </span>
             </div>
 
             <div className="pb-2">
               <TransportBar
                 playing={playing}
-                disabled={live || !duration}
+                disabled={!clipReady}
                 onToggle={togglePlay}
                 onSkip={(d) => {
                   seek((clipVideo.current?.currentTime ?? 0) + d)
@@ -388,7 +566,7 @@ export default function Viewer({ secret }: { secret: string }) {
                 }}
                 currentTime={time}
                 duration={duration}
-                downloadUrl={v.clip?.url}
+                downloadUrl={clipReady ? v.clip?.url : undefined}
                 downloadName={
                   header
                     ? `plantlapse-${header.windowId}-${new Date(header.toT)
@@ -416,6 +594,41 @@ export default function Viewer({ secret }: { secret: string }) {
 
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Canvas rather than <img>: the bitmap is already decoded when it arrives, so
+ * drawing it is synchronous and the stage never flashes empty between frames.
+ * The layout effect matters — it runs before the scrubber's rAF releases the
+ * previous bitmap.
+ */
+function FrameSurface({ preview, visible }: { preview: FramePreview | null; visible: boolean }) {
+  const ref = useRef<HTMLCanvasElement>(null)
+
+  useLayoutEffect(() => {
+    const canvas = ref.current
+    if (!canvas || !preview) return
+    const { bitmap } = preview
+    try {
+      if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+        canvas.width = bitmap.width
+        canvas.height = bitmap.height
+      }
+      canvas.getContext('2d')?.drawImage(bitmap, 0, 0)
+    } catch {
+      // Closed by a newer frame that won the race; that one is already drawn.
+    }
+  }, [preview])
+
+  return (
+    <canvas
+      ref={ref}
+      className={cn(
+        'pointer-events-none absolute inset-0 size-full object-contain',
+        visible ? 'opacity-100' : 'opacity-0',
+      )}
+    />
+  )
+}
+
 function StageOverlay({
   connection,
   live,
@@ -423,6 +636,7 @@ function StageOverlay({
   loading,
   baking,
   hasClip,
+  previewing,
   windowLabel,
   onRetry,
 }: {
@@ -432,6 +646,7 @@ function StageOverlay({
   loading: { windowId: string; percent: number } | null
   baking: { windowId: string; done: number; total: number; phase: string } | null
   hasClip: boolean
+  previewing: boolean
   windowLabel: string
   onRetry: () => void
 }) {
@@ -464,6 +679,9 @@ function StageOverlay({
       </div>
     )
   }
+
+  // Rewound frames are on the stage; nothing below is worth covering them with.
+  if (previewing) return null
 
   if (live && !liveReady) {
     return (

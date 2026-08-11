@@ -127,6 +127,9 @@ export function Timeline({
         handleMove(e.clientX)
       }}
       onPointerUp={(e) => {
+        // The strip enables and disables as the source changes, so a release
+        // can arrive for a press that was never captured.
+        if (!e.currentTarget.hasPointerCapture(e.pointerId)) return
         e.currentTarget.releasePointerCapture(e.pointerId)
         onScrubEnd?.()
       }}

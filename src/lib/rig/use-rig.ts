@@ -10,8 +10,14 @@ import {
 import { CaptureEngine } from '@/lib/capture/engine'
 import { Baker, type BakeProgress } from '@/lib/bake/baker'
 import { WINDOWS, WINDOW_BY_ID, type WindowId } from '@/lib/ladder'
-import { archiveStats, getClipMeta, luminanceProfile, type ArchiveStats } from '@/lib/storage/archive'
-import { isPersisted, readClip, requestPersistence } from '@/lib/storage/opfs'
+import {
+  archiveStats,
+  getClipMeta,
+  luminanceProfile,
+  nearestFrame,
+  type ArchiveStats,
+} from '@/lib/storage/archive'
+import { isPersisted, readClip, readFrame, requestPersistence } from '@/lib/storage/opfs'
 import { createRoom, type Channels } from '@/lib/net/room'
 import type { ClipHeader, RigStatus, ViewerCommand } from '@/lib/net/protocol'
 import { updateSettings, useSettings } from '@/lib/settings'
@@ -339,6 +345,39 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
       setPeers((p) => p.filter((x) => x !== id))
     })
     ch.onCommand((cmd, peerId) => void handleCommandRef.current(cmd, peerId))
+
+    /**
+     * Scrub traffic. Deliberately kept off the command path: these are answered
+     * straight from storage with no encode, no bake and no state, so a viewer
+     * dragging at 20 requests a second never queues behind a clip transfer.
+     */
+    ch.onFrameRequest((req, peerId) => {
+      void (async () => {
+        const rec = await nearestFrame(req.t, req.level)
+        const blob = rec ? await readFrame(rec.slot, 'lo') : null
+        if (channelsRef.current !== ch) return
+        // Always answer, even with nothing to send: the viewer keeps only one
+        // request in flight, so a silent drop wedges its pump until the
+        // timeout. `t: 0` is the "no frame there" signal — the byte is filler,
+        // because a zero-length payload chunks into no packets at all.
+        if (!rec || !blob) {
+          ch.sendFrame(new ArrayBuffer(1), { seq: req.seq, t: 0 }, peerId)
+          return
+        }
+        ch.sendFrame(await blob.arrayBuffer(), { seq: req.seq, t: rec.t }, peerId)
+      })()
+    })
+
+    ch.onLumRequest((req, peerId) => {
+      void (async () => {
+        const values = await luminanceProfile(req.fromT, req.toT, req.buckets)
+        if (channelsRef.current !== ch) return
+        ch.sendLumProfile(
+          { fromT: req.fromT, toT: req.toT, values: Array.from(values) },
+          peerId,
+        )
+      })()
+    })
 
     const id = window.setInterval(() => {
       if (!Object.keys(ch.room.getPeers()).length) return
