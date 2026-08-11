@@ -10,7 +10,6 @@ export interface RigSettings {
   /** Archive-resolution height. Native capture res is used for the hi buffer. */
   archiveHeight: ArchiveHeight
   hiEnabled: boolean
-  hiMaxAgeMs: number
   budgetBytes: number
   qualityLo: number
   qualityHi: number
@@ -33,7 +32,6 @@ const DEFAULT_SETTINGS: Omit<RigSettings, 'secret'> = {
   deviceId: null,
   archiveHeight: 720,
   hiEnabled: true,
-  hiMaxAgeMs: 3 * 3_600_000,
   budgetBytes: 6 * GB,
   qualityLo: 0.72,
   qualityHi: 0.82,

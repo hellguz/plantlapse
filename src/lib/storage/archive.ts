@@ -1,6 +1,7 @@
 import {
   KEEP_HORIZON_MS,
   MAX_LEVEL,
+  resampleToClip,
   slotForTime,
   timeForSlot,
   type WindowId,
@@ -261,12 +262,19 @@ export async function nearestFrame(t: number, level = 0): Promise<FrameRecord | 
   )
 }
 
-/** Frames available for a window, at the spacing that window bakes at. */
+/**
+ * The exact frames a window bakes, in order.
+ *
+ * The level filter gives the window's spacing; the resample caps the result at
+ * one clip's worth. Both matter: reading a day at level 4 is ~2700 records,
+ * cheap, but a 6M window is ~7600 and every frame past the cap is a JPEG decode
+ * the clip would never show.
+ */
 export async function framesForWindow(spanMs: number, level: number, now = Date.now()) {
   const fromSlot = slotForTime(now - spanMs)
   const toSlot = slotForTime(now)
   const recs = await getFrameRange(fromSlot, toSlot)
   // level === trailing-zero count of slot, so this is exactly "level >= level".
   const step = 2 ** level
-  return recs.filter((r) => r.slot % step === 0)
+  return resampleToClip(recs.filter((r) => r.slot % step === 0))
 }

@@ -16,23 +16,18 @@ export const BASE_INTERVAL_MS = 2_000
 export const MAX_LEVEL = 10 // 2s * 2^10 = 2048s ≈ 34min
 export const TARGET_FPS = 60
 
+/**
+ * Every window bakes to the same one minute of playback, whatever span it
+ * covers. This is the single most important number in the app: it is the frame
+ * count the encoder has to chew through, so it sets both how long a bake takes
+ * and how much history is worth keeping at each spacing. A 1D window resampled
+ * to 3600 frames is a 24s step between frames — far finer than a plant moves.
+ */
+const CLIP_SECONDS = 60
+const MAX_CLIP_FRAMES = CLIP_SECONDS * TARGET_FPS
+
 const H = 3_600_000
 const D = 86_400_000
-
-/** Age horizon per level. Monotonically increasing — that's what makes it work. */
-export const KEEP_HORIZON_MS: number[] = [
-  6 * H, // L0  2s
-  12 * H, // L1  4s
-  1 * D, // L2  8s
-  2 * D, // L3  16s
-  4 * D, // L4  32s
-  8 * D, // L5  64s
-  16 * D, // L6  128s
-  32 * D, // L7  256s
-  64 * D, // L8  512s
-  128 * D, // L9  1024s
-  Number.POSITIVE_INFINITY, // L10 2048s — kept forever
-]
 
 function intervalMsForLevel(level: number) {
   return BASE_INTERVAL_MS * 2 ** level
@@ -59,12 +54,18 @@ export function levelForSlot(slot: number) {
   return n
 }
 
-/** Coarsest level whose frames still cover a window of this span uniformly. */
+/**
+ * The spacing a window bakes at: the coarsest level that still yields a full
+ * clip's worth of frames.
+ *
+ * One level coarser would leave the minute short. One level finer would only
+ * cost storage and encode time — the extra frames get resampled straight back
+ * out at bake time. The retention horizons below are derived from this choice,
+ * so it is the only knob.
+ */
 function levelForSpan(spanMs: number) {
-  for (let l = 0; l < KEEP_HORIZON_MS.length; l++) {
-    if (KEEP_HORIZON_MS[l] >= spanMs) return l
-  }
-  return MAX_LEVEL
+  const level = Math.floor(Math.log2(spanMs / MAX_CLIP_FRAMES / BASE_INTERVAL_MS))
+  return Math.max(0, Math.min(MAX_LEVEL, level))
 }
 
 export type WindowId = '1h' | '3h' | '6h' | '12h' | '1d' | '1w' | '1m' | '6m'
@@ -96,6 +97,67 @@ export const WINDOW_BY_ID = Object.fromEntries(WINDOWS.map((w) => [w.id, w])) as
   WindowId,
   TimeWindow
 >
+
+/**
+ * A bake starts whenever it starts, and reads back a full span from that
+ * moment — so the oldest frames it wants are already at the horizon. Keep a
+ * little past it or every clip loses its own tail.
+ */
+const HORIZON_SLACK = 1.2
+
+/**
+ * Age horizon per level, derived from the windows.
+ *
+ * A window baking at level k reads the frames spaced 2^k apart, which is
+ * exactly the frames of level >= k — it never touches anything finer. So a
+ * frame of level L is worth keeping only as long as the *largest* window that
+ * bakes at level L or below still reaches back to it. Anything older is storage
+ * no view can ever ask for.
+ *
+ * Monotonically increasing, which is what makes the janitor's single rule work:
+ * coarser levels are read by larger windows by construction.
+ */
+function deriveHorizons(): number[] {
+  const out = new Array<number>(MAX_LEVEL + 1).fill(0)
+  for (const w of WINDOWS) {
+    for (let l = w.level; l <= MAX_LEVEL; l++) {
+      out[l] = Math.max(out[l], w.spanMs * HORIZON_SLACK)
+    }
+  }
+  // The coarsest tier is the archive's memory: 2048s frames are ~7600 per half
+  // year, so they are kept until the byte budget says otherwise. Cutting them
+  // at 6M would make history the app can currently show unrecoverable later.
+  out[MAX_LEVEL] = Number.POSITIVE_INFINITY
+  return out
+}
+
+export const KEEP_HORIZON_MS: number[] = deriveHorizons()
+
+/**
+ * How long native-resolution copies are worth keeping.
+ *
+ * A window bakes in hi only if *every* frame it reads still has one, so the
+ * smallest window is the only one that can ever qualify. A native frame is the
+ * most expensive file in the archive — roughly double the archive copy — so
+ * keeping any past that span is pure cost with no reader.
+ */
+export const HI_BUFFER_MS = WINDOWS[0].spanMs * HORIZON_SLACK
+
+/**
+ * Thin a window's candidate frames down to one clip's worth, evenly spaced.
+ *
+ * Deliberately not "every Nth": an integer stride can only halve or third the
+ * list, so 5400 candidates would round down to 2700 and give a 45s clip out of
+ * a minute's budget. Sampling by position lands on 3600 exactly, whatever the
+ * input, which is why the level above is allowed to be generous.
+ */
+export function resampleToClip<T>(items: T[], max = MAX_CLIP_FRAMES): T[] {
+  if (items.length <= max) return items
+  const out = new Array<T>(max)
+  const step = (items.length - 1) / (max - 1)
+  for (let i = 0; i < max; i++) out[i] = items[Math.round(i * step)]
+  return out
+}
 
 /**
  * Rough steady-state frame count of the whole archive, used for storage

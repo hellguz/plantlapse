@@ -19,27 +19,38 @@ import type { BakeMessage, BakeRequest } from './protocol'
 const post = (msg: BakeMessage, transfer: Transferable[] = []) =>
   (self as unknown as DedicatedWorkerGlobalScope).postMessage(msg, transfer)
 
+/**
+ * Trimmed ~a third below the obvious values. A plant barely moves between
+ * frames, so H.264 spends its bits on the keyframes and the inter-frame
+ * residual is nearly free — the visible quality loss is small and the clip
+ * arrives over the datachannel proportionally sooner.
+ */
 function bitrateFor(height: number) {
-  if (height >= 1080) return 5_000_000
-  if (height >= 720) return 2_800_000
-  return 1_600_000
+  if (height >= 1080) return 3_400_000
+  if (height >= 720) return 1_900_000
+  return 1_100_000
 }
 
 /** Even dimensions only — H.264 chroma subsampling requires it. */
 const even = (n: number) => Math.max(2, Math.round(n / 2) * 2)
 
-function drawStamp(
-  ctx: OffscreenCanvasRenderingContext2D,
-  text: string,
-  w: number,
-  h: number,
-) {
+/** Font and alignment are constant for a clip; only the text changes. */
+function stampFont(ctx: OffscreenCanvasRenderingContext2D, h: number) {
   const size = Math.max(11, Math.round(h / 34))
-  const pad = Math.round(size * 0.9)
   ctx.font = `500 ${size}px ui-monospace, "SF Mono", "Roboto Mono", monospace`
   ctx.textBaseline = 'bottom'
   ctx.textAlign = 'left'
+  return size
+}
 
+function drawStamp(
+  ctx: OffscreenCanvasRenderingContext2D,
+  text: string,
+  size: number,
+  w: number,
+  h: number,
+) {
+  const pad = Math.round(size * 0.9)
   const metrics = ctx.measureText(text)
   const boxW = metrics.width + pad * 1.2
   const boxH = size * 1.7
@@ -84,6 +95,7 @@ async function bake(req: BakeRequest) {
 
   const canvas = new OffscreenCanvas(width, height)
   const ctx = canvas.getContext('2d', { alpha: false })!
+  const stampSize = stampFont(ctx, height)
 
   const output = new Output({ format: new Mp4OutputFormat(), target: new BufferTarget() })
   const source = new CanvasSource(canvas, {
@@ -99,17 +111,44 @@ async function bake(req: BakeRequest) {
   const dur = 1 / TARGET_FPS
   let encoded = 0
 
-  for (let i = 0; i < recs.length; i++) {
-    const rec = recs[i]
-    const blob = await readFrame(rec.slot, variant)
-    if (!blob) continue // gap in the archive; drop the frame rather than the clip
+  /**
+   * Reading the JPEG off OPFS and decoding it is the wall here — several times
+   * the cost of a hardware H.264 encode. Done strictly in step with the encoder
+   * the two take turns idling, so keep a few decodes in flight: each `await`
+   * below hands the thread back and the ones behind it are already working.
+   */
+  const READ_AHEAD = 4
+  const decode = (rec: (typeof recs)[number]) =>
+    readFrame(rec.slot, variant)
+      .then((blob) =>
+        blob
+          ? createImageBitmap(
+              blob,
+              // Let the decoder do the downscale where there is one, instead of
+              // decoding full size and throwing pixels away in drawImage.
+              scale < 1 ? { resizeWidth: width, resizeHeight: height, resizeQuality: 'medium' } : {},
+            )
+          : null,
+      )
+      .catch(() => null) // gap or corrupt frame; drop it rather than the clip
 
-    const bmp = await createImageBitmap(blob)
+  const pending: Array<Promise<ImageBitmap | null>> = []
+  for (let i = 0; i < Math.min(READ_AHEAD, recs.length); i++) pending.push(decode(recs[i]))
+
+  for (let i = 0; i < recs.length; i++) {
+    const bmp = await pending.shift()!
+    const ahead = i + READ_AHEAD
+    if (ahead < recs.length) pending.push(decode(recs[ahead]))
+    if (!bmp) continue
+
     ctx.drawImage(bmp, 0, 0, width, height)
     bmp.close()
-    drawStamp(ctx, formatStamp(rec.t), width, height)
+    drawStamp(ctx, formatStamp(recs[i].t), stampSize, width, height)
 
-    timestamps[encoded] = rec.t
+    timestamps[encoded] = recs[i].t
+    // Awaited per frame on purpose: the sample is snapshotted synchronously, but
+    // the encoder's keyframe and timing bookkeeping is not re-entrant, so
+    // overlapping adds would corrupt the GOP structure.
     await source.add(encoded * dur, dur)
     encoded++
 

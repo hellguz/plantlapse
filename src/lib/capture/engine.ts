@@ -1,4 +1,4 @@
-import { BASE_INTERVAL_MS, levelForSlot, slotForTime, timeForSlot } from '@/lib/ladder'
+import { BASE_INTERVAL_MS, HI_BUFFER_MS, levelForSlot, slotForTime, timeForSlot } from '@/lib/ladder'
 import { runBudgetGovernor, runHiDemoter, runJanitor, storeFrame } from '@/lib/storage/archive'
 import type { FrameRecord } from '@/lib/storage/idb'
 import type { RigSettings } from '@/lib/settings'
@@ -149,9 +149,7 @@ export class CaptureEngine {
     this.lastMaintenance = now
     try {
       const thinned = await runJanitor(now)
-      const demoted = this.settings.hiEnabled
-        ? await runHiDemoter(this.settings.hiMaxAgeMs, now)
-        : 0
+      const demoted = this.settings.hiEnabled ? await runHiDemoter(HI_BUFFER_MS, now) : 0
       const { trimmed } = await runBudgetGovernor(this.settings.budgetBytes)
       if (thinned || demoted || trimmed) {
         this.events.onMaintenance?.({ thinned, demoted, trimmed })
