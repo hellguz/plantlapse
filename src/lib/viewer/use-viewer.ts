@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { createRoom, type Channels } from '@/lib/net/room'
 import type { ClipHeader, ConnectionState, LumProfile, RigStatus } from '@/lib/net/protocol'
 import type { WindowId } from '@/lib/ladder'
+import type { Rotation } from '@/lib/utils'
 import { FrameScrubber, type FramePreview } from './frame-scrubber'
 
 interface LoadedClip {
@@ -43,7 +44,7 @@ export interface ViewerController {
   requestLuminance: (fromT: number, toT: number, buckets?: number) => void
   setLive: (on: boolean) => void
   setTorch: (on: boolean) => void
-  setCamera: (deviceId: string) => void
+  setRotation: (deg: Rotation) => void
   reconnect: () => void
 }
 
@@ -221,8 +222,8 @@ export function useViewer(secret: string): ViewerController {
   }, [])
 
   const setTorch = useCallback((on: boolean) => send({ type: 'setTorch', on }), [send])
-  const setCamera = useCallback(
-    (deviceId: string) => send({ type: 'setCamera', deviceId }),
+  const setRotation = useCallback(
+    (deg: Rotation) => send({ type: 'setRotation', deg }),
     [send],
   )
 
@@ -240,7 +241,7 @@ export function useViewer(secret: string): ViewerController {
     requestLuminance,
     setLive,
     setTorch,
-    setCamera,
+    setRotation,
     reconnect,
   }
 }

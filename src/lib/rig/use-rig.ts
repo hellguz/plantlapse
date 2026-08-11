@@ -20,7 +20,8 @@ import {
 import { isPersisted, readClip, readFrame, requestPersistence } from '@/lib/storage/opfs'
 import { createRoom, type Channels } from '@/lib/net/room'
 import type { ClipHeader, RigStatus, ViewerCommand } from '@/lib/net/protocol'
-import { updateSettings, useSettings } from '@/lib/settings'
+import { getSettings, updateSettings, useSettings } from '@/lib/settings'
+import { asRotation, nextRotation } from '@/lib/utils'
 
 const STATUS_INTERVAL_MS = 2_000
 const STATS_INTERVAL_MS = 5_000
@@ -47,6 +48,7 @@ export interface RigController {
   disarm: () => void
   toggleTorch: () => Promise<void>
   selectCamera: (deviceId: string) => void
+  rotate: () => void
   bakeNow: (id: WindowId) => void
   requestPersist: () => Promise<void>
 }
@@ -231,6 +233,7 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
       torchAvailable,
       cameras: cameras.map((c) => ({ deviceId: c.deviceId, label: c.label, facing: c.facing })),
       activeDeviceId: s.deviceId,
+      rotation: s.rotation,
       captureWidth: captureSize.width,
       captureHeight: captureSize.height,
       archiveHeight: s.archiveHeight,
@@ -300,8 +303,10 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
           }
           break
         }
-        case 'setCamera': {
-          updateSettings({ deviceId: cmd.deviceId })
+        case 'setRotation': {
+          // Display only — no track is reopened and no stored byte changes, so
+          // this is the one piece of the camera a remote peer may touch.
+          updateSettings({ rotation: asRotation(cmd.deg) })
           break
         }
         case 'setLive': {
@@ -405,14 +410,31 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
     engineRef.current.updateSettings(settingsRef.current)
     engineRef.current.start()
     await wakeRef.current.enable()
+    updateSettings({ capturing: true })
     setArmed(true)
   }, [videoRef])
 
   const disarm = useCallback(() => {
     engineRef.current?.stop()
     void wakeRef.current.disable()
+    updateSettings({ capturing: false })
     setArmed(false)
   }, [])
+
+  /**
+   * Resume by itself on load.
+   *
+   * Android eventually reaps a tab that has held a camera for days, and the
+   * README is honest that you should expect to reopen it. Requiring a tap to
+   * restart turns that into a plant that recorded one night and then quietly
+   * stopped — the one failure this design cannot tolerate. `getSettings()`
+   * rather than the settings ref because `disarm` writes synchronously, and a
+   * stale read here would immediately re-arm what the user just stopped.
+   */
+  useEffect(() => {
+    if (!cameraReady || armed || !getSettings().capturing) return
+    void arm()
+  }, [cameraReady, armed, arm])
 
   useEffect(() => {
     engineRef.current?.updateSettings(settings)
@@ -429,6 +451,10 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
 
   const selectCamera = useCallback((deviceId: string) => {
     updateSettings({ deviceId })
+  }, [])
+
+  const rotate = useCallback(() => {
+    updateSettings({ rotation: nextRotation(settingsRef.current.rotation) })
   }, [])
 
   const bakeNow = useCallback((id: WindowId) => void baker.bake(id), [baker])
@@ -454,6 +480,7 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
     disarm,
     toggleTorch,
     selectCamera,
+    rotate,
     bakeNow,
     requestPersist,
   }

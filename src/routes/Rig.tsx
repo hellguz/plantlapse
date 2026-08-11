@@ -7,6 +7,7 @@ import {
   Play,
   QrCode,
   RefreshCcw,
+  RotateCw,
   Settings2,
   Square,
   SwitchCamera,
@@ -19,7 +20,8 @@ import { PairSheet } from '@/components/rig/PairSheet'
 import { useRig } from '@/lib/rig/use-rig'
 import { GB, updateSettings, useSettings, type ArchiveHeight } from '@/lib/settings'
 import { navigate } from '@/lib/hash-route'
-import { formatBytes, formatSpan, formatStampShort } from '@/lib/utils'
+import { useElementSize } from '@/lib/use-element-size'
+import { formatBytes, formatSpan, formatStampShort, rotatedAspect, rotatedStyle } from '@/lib/utils'
 import { WINDOWS, steadyStateFrameCount } from '@/lib/ladder'
 import { wipeAll } from '@/lib/storage/opfs'
 import { DB_NAME } from '@/lib/storage/idb'
@@ -28,8 +30,10 @@ const ARCHIVE_HEIGHTS: ArchiveHeight[] = [540, 720, 1080]
 
 export default function Rig() {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const previewRef = useRef<HTMLDivElement>(null)
   const rig = useRig(videoRef)
   const settings = useSettings()
+  const previewBox = useElementSize(previewRef)
   const [pairOpen, setPairOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [showControls, setShowControls] = useState(true)
@@ -90,7 +94,18 @@ export default function Rig() {
       </header>
 
       {/* ----------------------------------------------------------- preview */}
-      <div className="relative mx-4 overflow-hidden rounded-app bg-black">
+      {/* The box carries the aspect ratio and the video fills it, so a quarter
+          turn re-proportions the frame instead of spinning a landscape picture
+          inside a portrait hole. */}
+      <div
+        ref={previewRef}
+        className="relative mx-4 overflow-hidden rounded-app bg-black"
+        style={{
+          aspectRatio: rig.captureSize.width
+            ? rotatedAspect(rig.captureSize.width, rig.captureSize.height, settings.rotation)
+            : rotatedAspect(3, 4, settings.rotation),
+        }}
+      >
         {/* The preview must show exactly what gets archived, so it follows the
             camera's real aspect ratio and never crops. */}
         <video
@@ -98,12 +113,8 @@ export default function Rig() {
           playsInline
           muted
           autoPlay
-          className="w-full object-contain"
-          style={{
-            aspectRatio: rig.captureSize.width
-              ? `${rig.captureSize.width} / ${rig.captureSize.height}`
-              : '3 / 4',
-          }}
+          className="absolute inset-0 size-full object-contain"
+          style={rotatedStyle(settings.rotation, previewBox)}
         />
 
         {!rig.cameraReady && (
@@ -139,6 +150,14 @@ export default function Rig() {
               <SwitchCamera size={18} />
             </Button>
           )}
+          <Button
+            size="icon"
+            variant="subtle"
+            onClick={rig.rotate}
+            aria-label={`Rotate the picture (currently ${settings.rotation}°)`}
+          >
+            <RotateCw size={18} />
+          </Button>
         </div>
       </div>
 
@@ -228,10 +247,10 @@ export default function Rig() {
             size="lg"
             className="w-full"
             disabled={!rig.cameraReady}
-            onClick={() => {
-              setShowControls(false)
-              void rig.arm()
-            }}
+            // Arming does not dim. Blacking the screen the instant recording
+            // starts hides the confirmation that it started at all — reach for
+            // Dim when you have seen the frame counter move.
+            onClick={() => void rig.arm()}
           >
             <Play size={18} />
             Start recording
@@ -305,11 +324,11 @@ export default function Rig() {
             />
           </Row>
 
-          <Row label="Black screen when armed" hint="Near-zero draw on AMOLED">
+          <Row label="Black screen" hint="Offers the Dim button while armed — near-zero draw on AMOLED">
             <Switch
               checked={settings.blackScreen}
               onChange={(v) => updateSettings({ blackScreen: v })}
-              label="Black screen when armed"
+              label="Black screen"
             />
           </Row>
         </div>

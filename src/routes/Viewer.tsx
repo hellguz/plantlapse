@@ -10,9 +10,9 @@ import { SeekPump } from '@/lib/viewer/seek-pump'
 import type { FramePreview } from '@/lib/viewer/frame-scrubber'
 import { TARGET_FPS, WINDOWS, WINDOW_BY_ID, type WindowId } from '@/lib/ladder'
 import { navigate } from '@/lib/hash-route'
-import { clamp, cn, formatSpan, formatStamp } from '@/lib/utils'
+import { useElementSize } from '@/lib/use-element-size'
+import { asRotation, clamp, cn, formatSpan, formatStamp, rotatedStyle } from '@/lib/utils'
 
-const CONTROLS_HIDE_MS = 3800
 /** Buckets in the day/night strip; matches the profile the rig returns. */
 const LUM_BUCKETS = 240
 
@@ -51,7 +51,7 @@ export default function Viewer({ secret }: { secret: string }) {
 
   const clipVideo = useRef<HTMLVideoElement>(null)
   const liveVideo = useRef<HTMLVideoElement>(null)
-  const hideTimer = useRef<number | null>(null)
+  const stageRef = useRef<HTMLDivElement>(null)
   const gesture = useRef<StageGesture>({
     down: false,
     startX: 0,
@@ -64,6 +64,7 @@ export default function Viewer({ secret }: { secret: string }) {
   })
 
   const [pump] = useState(() => new SeekPump())
+  const stage = useElementSize(stageRef)
 
   // Fallback bounds for the timeline before any status has arrived.
   const [mountedAt] = useState(() => Date.now())
@@ -185,21 +186,12 @@ export default function Viewer({ secret }: { secret: string }) {
     return () => cancelAnimationFrame(raf)
   }, [playing, clipReady])
 
-  const showControls = useCallback(() => {
-    setControls(true)
-    if (hideTimer.current) clearTimeout(hideTimer.current)
-    hideTimer.current = window.setTimeout(() => setControls(false), CONTROLS_HIDE_MS)
-  }, [])
-
-  // Controls start visible; this only arms the auto-hide and cleans up.
-  useEffect(() => {
-    const timer = window.setTimeout(() => setControls(false), CONTROLS_HIDE_MS)
-    hideTimer.current = timer
-    return () => {
-      clearTimeout(timer)
-      if (hideTimer.current) clearTimeout(hideTimer.current)
-    }
-  }, [])
+  /**
+   * The controls never leave on their own. A timer that hides the range you
+   * are reading, mid-read, is chrome deciding it knows better; the only thing
+   * that dismisses them is a deliberate tap on the picture.
+   */
+  const showControls = useCallback(() => setControls(true), [])
 
   /* -------------------------------------------------------------- seeking */
 
@@ -267,6 +259,11 @@ export default function Viewer({ secret }: { secret: string }) {
   }, [clipReady, live, header, v.lumProfile, scrubSpan, win.spanMs])
 
   const previewVisible = !!v.preview && activeRewindT !== null
+
+  // The rig owns the angle so both phones agree on which way is up, and so it
+  // survives reopening the viewer on a different device.
+  const rotation = asRotation(v.status?.rotation)
+  const turn = rotatedStyle(rotation, stage)
 
   /* ------------------------------------------------------------- gestures */
 
@@ -370,6 +367,7 @@ export default function Viewer({ secret }: { secret: string }) {
     <div className="relative flex h-dvh flex-col overflow-hidden bg-black">
       {/* ------------------------------------------------------------ stage */}
       <div
+        ref={stageRef}
         className="relative flex-1 touch-none select-none"
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -381,6 +379,7 @@ export default function Viewer({ secret }: { secret: string }) {
           playsInline
           muted
           loop
+          style={turn}
           className={cn(
             'absolute inset-0 size-full object-contain transition-opacity duration-300',
             clipReady ? 'opacity-100' : 'opacity-0',
@@ -392,6 +391,7 @@ export default function Viewer({ secret }: { secret: string }) {
           playsInline
           muted
           autoPlay
+          style={turn}
           className={cn(
             'absolute inset-0 size-full object-contain transition-opacity duration-300',
             live ? 'opacity-100' : 'opacity-0',
@@ -400,7 +400,7 @@ export default function Viewer({ secret }: { secret: string }) {
 
         {/* Single archive frames, painted over whatever is behind. No fade on
             the way in: it has to feel like the drag is moving the picture. */}
-        <FrameSurface preview={v.preview} visible={previewVisible} />
+        <FrameSurface preview={v.preview} visible={previewVisible} style={turn} />
 
         <StageOverlay
           connection={v.connection}
@@ -586,7 +586,7 @@ export default function Viewer({ secret }: { secret: string }) {
         onClose={() => setSheetOpen(false)}
         status={v.status}
         onTorch={v.setTorch}
-        onCamera={v.setCamera}
+        onRotate={v.setRotation}
       />
     </div>
   )
@@ -600,7 +600,15 @@ export default function Viewer({ secret }: { secret: string }) {
  * The layout effect matters — it runs before the scrubber's rAF releases the
  * previous bitmap.
  */
-function FrameSurface({ preview, visible }: { preview: FramePreview | null; visible: boolean }) {
+function FrameSurface({
+  preview,
+  visible,
+  style,
+}: {
+  preview: FramePreview | null
+  visible: boolean
+  style?: React.CSSProperties
+}) {
   const ref = useRef<HTMLCanvasElement>(null)
 
   useLayoutEffect(() => {
@@ -621,6 +629,7 @@ function FrameSurface({ preview, visible }: { preview: FramePreview | null; visi
   return (
     <canvas
       ref={ref}
+      style={style}
       className={cn(
         'pointer-events-none absolute inset-0 size-full object-contain',
         visible ? 'opacity-100' : 'opacity-0',

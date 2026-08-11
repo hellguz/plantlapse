@@ -1,4 +1,5 @@
 import type { WindowId } from '@/lib/ladder'
+import type { Rotation } from '@/lib/utils'
 
 export const APP_ID = 'plantlapse-v1'
 
@@ -47,6 +48,8 @@ export interface RigStatus {
   torchAvailable: boolean
   cameras: CameraDescriptor[]
   activeDeviceId: string | null
+  /** Quarter turn every surface should be painted through. Display only. */
+  rotation: Rotation
   captureWidth: number
   captureHeight: number
   archiveHeight: number
@@ -63,9 +66,18 @@ export interface RigStatus {
   baking: BakeStatus | null
 }
 
+/**
+ * What a paired viewer is allowed to ask the rig to do.
+ *
+ * Deliberately short, and deliberately missing camera selection. Which sensor
+ * is open is a decision made at the phone that owns the lens — a peer that has
+ * the pairing secret can watch, and can turn the picture the right way up, but
+ * cannot repoint the camera at something else. `setRotation` is safe to expose
+ * because it changes nothing but a CSS transform.
+ */
 export type ViewerCommand =
   | { type: 'setTorch'; on: boolean }
-  | { type: 'setCamera'; deviceId: string }
+  | { type: 'setRotation'; deg: number }
   | { type: 'setLive'; on: boolean }
   | { type: 'requestClip'; windowId: WindowId; force?: boolean }
   | { type: 'requestStatus' }

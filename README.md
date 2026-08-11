@@ -25,7 +25,9 @@ browser warning once on each device.
 
 1. Open the site on **phone 1** (Chrome on Android) → *Use this phone as the camera*.
 2. *Pair viewer* → scan the QR from **phone 2**, or type the code on its home screen.
-3. *Start recording*. The screen goes black; drop system brightness to zero.
+3. *Start recording*, watch the frame counter move, then tap *Dim* — the screen only
+   blacks out when you ask it to. Drop system brightness to zero as well. Recording is
+   remembered, so a reload (or Android reaping the tab overnight) resumes it unasked.
 4. On phone 2, pick a range — or `LIVE`, which is just the right-hand end of the timeline.
 5. Drag anywhere on the picture, or on the strip, to scrub. From `LIVE` that is a peek
    back over the selected range; release and it snaps to the present.
@@ -75,6 +77,16 @@ far back a full-width drag reaches is whichever range the chips last had selecte
 
 **Transport.** Trystero over public Nostr relays for signalling, then direct WebRTC,
 end-to-end encrypted. The pairing secret lives in the URL fragment and is the room id.
+
+**What a viewer may do.** Watch, request clips, toggle the torch, and rotate the picture.
+Not select a camera — which lens is open is decided at the phone that owns it, so a leaked
+pairing link cannot repoint the lens at something else. Audio is never requested, and any
+audio track is stopped and stripped before the stream can be published.
+
+**Rotation** is a quarter turn applied at paint time on both phones, never baked in. So it
+re-orients six months of existing frames the instant you set it, and costs the rig nothing.
+The trade: the timestamp burned into a clip turns with the clip, and a downloaded MP4 keeps
+the sensor's original orientation.
 
 ## Known limits
 

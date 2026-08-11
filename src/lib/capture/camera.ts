@@ -56,7 +56,15 @@ export interface OpenCameraResult {
   deviceId: string
 }
 
-/** Audio is never requested — this app has no use for a microphone. */
+/**
+ * Audio is never requested, and never carried.
+ *
+ * `audio: false` is the ask; the sweep below is the guarantee. This stream is
+ * handed straight to `room.addStream`, which publishes every track on it — so
+ * an audio track surviving to that point would be a live microphone in someone
+ * else's house. Belt and braces is the right amount of paranoia for a device
+ * left recording in a room for months.
+ */
 export async function openCamera(deviceId?: string | null): Promise<OpenCameraResult> {
   const video: MediaTrackConstraints = {
     width: { ideal: MAX_CAPTURE_WIDTH },
@@ -67,6 +75,11 @@ export async function openCamera(deviceId?: string | null): Promise<OpenCameraRe
   else video.facingMode = { ideal: 'environment' }
 
   const stream = await navigator.mediaDevices.getUserMedia({ video, audio: false })
+  for (const audio of stream.getAudioTracks()) {
+    audio.stop()
+    stream.removeTrack(audio)
+  }
+
   const track = stream.getVideoTracks()[0]
   const settings = track.getSettings()
   const caps = (track.getCapabilities?.() ?? {}) as TorchCapableCapabilities

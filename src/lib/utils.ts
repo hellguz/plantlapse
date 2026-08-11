@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react'
 import { clsx, type ClassValue } from 'clsx'
 import { twMerge } from 'tailwind-merge'
 
@@ -47,6 +48,58 @@ export function formatStamp(ms: number) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(
     d.getMinutes(),
   )}:${pad(d.getSeconds())}`
+}
+
+/* -------------------------------------------------------------------------- */
+/* Orientation                                                                 */
+/* -------------------------------------------------------------------------- */
+
+export type Rotation = 0 | 90 | 180 | 270
+
+const ROTATIONS: Rotation[] = [0, 90, 180, 270]
+
+export function nextRotation(r: Rotation): Rotation {
+  return ROTATIONS[(ROTATIONS.indexOf(r) + 1) % ROTATIONS.length]
+}
+
+/** Anything arriving over the wire is coerced onto the four legal turns. */
+export function asRotation(v: unknown): Rotation {
+  return ROTATIONS.includes(v as Rotation) ? (v as Rotation) : 0
+}
+
+/**
+ * Display-only rotation for a surface filling a `box`-sized parent.
+ *
+ * Nothing is ever re-encoded. The archive keeps whatever the sensor gave it and
+ * the turn happens at paint time, which is the only reason it can apply to six
+ * months of frames stored long before you noticed the phone was mounted
+ * sideways — and why it costs the rig nothing to change.
+ *
+ * A quarter turn swaps the box, so the element is given the parent's dimensions
+ * *transposed* and spun about its own centre. Getting that transpose right is
+ * the whole trick: size it to the parent as-is and `object-fit` contains the
+ * picture into a box of the wrong orientation, which then shrinks again when it
+ * turns — a double fit that leaves margin on all four sides instead of two.
+ */
+export function rotatedStyle(deg: Rotation, box: { w: number; h: number }): CSSProperties {
+  if (deg === 0) return {}
+  if (deg === 180) return { transform: 'rotate(180deg)' }
+  if (!box.w || !box.h) return {}
+  return {
+    width: box.h,
+    height: box.w,
+    left: '50%',
+    top: '50%',
+    right: 'auto',
+    bottom: 'auto',
+    transform: `translate(-50%, -50%) rotate(${deg}deg)`,
+  }
+}
+
+/** Quarter turns swap a preview box's aspect ratio along with the picture. */
+export function rotatedAspect(width: number, height: number, deg: Rotation) {
+  const quarter = deg === 90 || deg === 270
+  return quarter ? `${height} / ${width}` : `${width} / ${height}`
 }
 
 export function formatStampShort(ms: number) {

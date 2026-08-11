@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react'
+import type { Rotation } from '@/lib/utils'
 
 export type ArchiveHeight = 540 | 720 | 1080
 
@@ -16,6 +17,17 @@ export interface RigSettings {
   /** Auto-bake windows in the background so playback is instant. */
   autoBake: boolean
   blackScreen: boolean
+  /**
+   * Recording is meant to be running. Persisted so a reload — or Android
+   * reaping the tab overnight — resumes capture without anyone tapping.
+   */
+  capturing: boolean
+  /**
+   * Display-only quarter turn applied to everything the rig shows and sends.
+   * Stored frames are untouched, so changing it re-orients the whole archive
+   * at once rather than only what is captured from now on.
+   */
+  rotation: Rotation
 }
 
 const KEY = 'plantlapse:settings:v1'
@@ -37,6 +49,8 @@ const DEFAULT_SETTINGS: Omit<RigSettings, 'secret'> = {
   qualityHi: 0.82,
   autoBake: true,
   blackScreen: true,
+  capturing: false,
+  rotation: 0,
 }
 
 function load(): RigSettings {
