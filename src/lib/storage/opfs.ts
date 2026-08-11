@@ -29,9 +29,41 @@ function shardFor(slot: number) {
   return Math.floor(slot / SHARD_SLOTS)
 }
 
+/**
+ * Directory handles are cached because resolving one is an IPC round trip to
+ * the storage process, and a bake resolves the same handful of shards thousands
+ * of times over. Caching them takes the per-frame cost from three lookups to
+ * one, which is most of the read path.
+ *
+ * Only *resolved* handles are cached, never in-flight lookups. That costs a few
+ * duplicate lookups the first time a shard is touched, and buys the guarantee
+ * that a reader's `create: false` miss can never be handed to a writer that
+ * needed the directory created.
+ */
+let framesDir: FileSystemDirectoryHandle | null = null
+const shardCache = new Map<number, FileSystemDirectoryHandle>()
+/** A bake walks shards forward, so insertion order is also least-recently-used. */
+const SHARD_CACHE_MAX = 128
+
+function forgetDirs() {
+  framesDir = null
+  shardCache.clear()
+}
+
 async function frameShard(slot: number, create = true) {
-  const frames = await dir('frames', create)
-  return frames.getDirectoryHandle(String(shardFor(slot)), { create })
+  const id = shardFor(slot)
+  const hit = shardCache.get(id)
+  if (hit) return hit
+
+  framesDir ??= await dir('frames', create)
+  const handle = await framesDir.getDirectoryHandle(String(id), { create })
+
+  shardCache.set(id, handle)
+  if (shardCache.size > SHARD_CACHE_MAX) {
+    const oldest = shardCache.keys().next()
+    if (!oldest.done) shardCache.delete(oldest.value)
+  }
+  return handle
 }
 
 function frameName(slot: number, variant: Variant) {
@@ -80,6 +112,10 @@ export async function pruneShardsBefore(slot: number) {
   for (const name of stale) {
     await frames.removeEntry(name, { recursive: true }).catch(() => {})
   }
+  // A cached handle to a removed directory would keep answering reads with
+  // NotFoundError, which readFrame swallows as "no frame" — the same answer,
+  // but a write through one would throw. Drop them.
+  if (stale.length) forgetDirs()
   return stale.length
 }
 
@@ -132,4 +168,5 @@ export async function wipeAll() {
   for (const name of ['frames', 'clips']) {
     await r.removeEntry(name, { recursive: true }).catch(() => {})
   }
+  forgetDirs()
 }

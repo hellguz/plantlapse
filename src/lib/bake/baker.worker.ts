@@ -112,33 +112,57 @@ async function bake(req: BakeRequest) {
   let encoded = 0
 
   /**
-   * Reading the JPEG off OPFS and decoding it is the wall here — several times
-   * the cost of a hardware H.264 encode. Done strictly in step with the encoder
-   * the two take turns idling, so keep a few decodes in flight: each `await`
-   * below hands the thread back and the ones behind it are already working.
+   * Two read-aheads, because the two stages are bounded by different things.
+   *
+   * Fetching is latency-bound: every frame is an OPFS handle lookup plus a read,
+   * each an IPC round trip, and the only way to hide that is to have many in
+   * flight. The bytes are cheap to hold — an archive JPEG is ~85KB, so a deep
+   * queue is a few MB. Decoding is the opposite: a decoded 720p bitmap is 2.7MB,
+   * so only a few can be alive at once, and it overlaps the encode well enough
+   * at that depth anyway.
    */
-  const READ_AHEAD = 4
-  const decode = (rec: (typeof recs)[number]) =>
+  const FETCH_AHEAD = 32
+  const DECODE_AHEAD = 4
+
+  const fetchBytes = (rec: (typeof recs)[number]) =>
     readFrame(rec.slot, variant)
-      .then((blob) =>
-        blob
-          ? createImageBitmap(
-              blob,
-              // Let the decoder do the downscale where there is one, instead of
-              // decoding full size and throwing pixels away in drawImage.
-              scale < 1 ? { resizeWidth: width, resizeHeight: height, resizeQuality: 'medium' } : {},
-            )
-          : null,
-      )
+      // Pull the bytes here rather than letting createImageBitmap do it, so the
+      // read is overlapped at fetch depth instead of decode depth.
+      .then((blob) => blob?.arrayBuffer() ?? null)
       .catch(() => null) // gap or corrupt frame; drop it rather than the clip
 
-  const pending: Array<Promise<ImageBitmap | null>> = []
-  for (let i = 0; i < Math.min(READ_AHEAD, recs.length); i++) pending.push(decode(recs[i]))
+  const decodeBytes = (bytes: ArrayBuffer | null) =>
+    bytes
+      ? createImageBitmap(
+          new Blob([bytes], { type: 'image/jpeg' }),
+          // Let the decoder do the downscale where there is one, instead of
+          // decoding full size and throwing pixels away in drawImage.
+          scale < 1 ? { resizeWidth: width, resizeHeight: height, resizeQuality: 'medium' } : {},
+        ).catch(() => null)
+      : Promise.resolve(null)
+
+  const fetched: Array<Promise<ArrayBuffer | null>> = []
+  const decoding: Array<Promise<ImageBitmap | null>> = []
+  let fetchAt = 0
+
+  const topUpFetches = () => {
+    while (fetchAt < recs.length && fetched.length < FETCH_AHEAD) {
+      fetched.push(fetchBytes(recs[fetchAt++]))
+    }
+  }
+  /** Hand the oldest fetched frame to the decoder, if there is one waiting. */
+  const topUpDecode = () => {
+    const next = fetched.shift()
+    if (next) decoding.push(next.then(decodeBytes))
+  }
+
+  topUpFetches()
+  for (let i = 0; i < DECODE_AHEAD && i < recs.length; i++) topUpDecode()
 
   for (let i = 0; i < recs.length; i++) {
-    const bmp = await pending.shift()!
-    const ahead = i + READ_AHEAD
-    if (ahead < recs.length) pending.push(decode(recs[ahead]))
+    const bmp = await decoding.shift()!
+    topUpFetches()
+    topUpDecode()
     if (!bmp) continue
 
     ctx.drawImage(bmp, 0, 0, width, height)
