@@ -121,14 +121,17 @@ export function stopStream(stream: MediaStream | null) {
  * It is also released automatically on tab switch, hence the re-acquire on
  * visibility change.
  */
+const WAKE_RETRY_MS = 30_000
+
 export function createWakeLock() {
   let sentinel: WakeLockSentinel | null = null
   let wanted = false
+  let retry: number | null = null
 
   async function acquire() {
     if (!wanted || sentinel) return
     try {
-      sentinel = await navigator.wakeLock?.request('screen')
+      sentinel = (await navigator.wakeLock?.request('screen')) ?? null
       sentinel?.addEventListener('release', () => {
         sentinel = null
       })
@@ -145,11 +148,18 @@ export function createWakeLock() {
     async enable() {
       wanted = true
       document.addEventListener('visibilitychange', onVisibility)
+      // A release can come from anywhere — a transient power-save state, a
+      // failed request while the tab was hidden — and nothing else would ever
+      // ask again. Over a month-long run the lock has to be re-taken, not
+      // merely taken.
+      retry ??= window.setInterval(() => void acquire(), WAKE_RETRY_MS)
       await acquire()
     },
     async disable() {
       wanted = false
       document.removeEventListener('visibilitychange', onVisibility)
+      if (retry !== null) clearInterval(retry)
+      retry = null
       await sentinel?.release().catch(() => {})
       sentinel = null
     },

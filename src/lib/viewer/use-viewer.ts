@@ -27,6 +27,13 @@ const STALE_MS = 12_000
 /** How long to sit disconnected before tearing the room down and rejoining. */
 const REJOIN_AFTER_MS = 9_000
 const TICK_MS = 2_000
+/**
+ * A live track that stops delivering frames goes `muted` without the peer
+ * leaving: the data channel keeps carrying status, so the viewer would sit
+ * happily "connected" in front of a frozen picture. Long enough to ride out a
+ * hiccup, short enough not to be what you notice.
+ */
+const LIVE_MUTE_GRACE_MS = 8_000
 
 export interface ViewerController {
   connection: ConnectionState
@@ -111,7 +118,34 @@ export function useViewer(secret: string): ViewerController {
       setStatus(s)
     })
 
-    ch.room.onPeerStream((stream) => setLiveStream(stream))
+    let muteTimer: number | null = null
+    const clearMuteTimer = () => {
+      if (muteTimer !== null) clearTimeout(muteTimer)
+      muteTimer = null
+    }
+
+    ch.room.onPeerStream((stream) => {
+      setLiveStream(stream)
+      clearMuteTimer()
+
+      const track = stream.getVideoTracks()[0]
+      if (!track) return
+
+      const onMute = () => {
+        clearMuteTimer()
+        muteTimer = window.setTimeout(() => {
+          if (track.muted) reconnect()
+        }, LIVE_MUTE_GRACE_MS)
+      }
+      track.addEventListener('mute', onMute)
+      track.addEventListener('unmute', clearMuteTimer)
+      track.addEventListener('ended', () => {
+        clearMuteTimer()
+        setLiveStream(null)
+        reconnect()
+      })
+      if (track.muted) onMute()
+    })
 
     ch.onClipHeader((h) => {
       pendingHeaderRef.current = h
@@ -173,6 +207,7 @@ export function useViewer(secret: string): ViewerController {
 
     return () => {
       clearInterval(watchdog)
+      clearMuteTimer()
       document.removeEventListener('visibilitychange', onVisible)
       scrubber.detach()
       ch.leave()
