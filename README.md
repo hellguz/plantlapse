@@ -98,3 +98,32 @@ the sensor's original orientation.
   fail to connect. Same-WLAN always works.
 - **Long uptime.** Android will eventually reap the tab. Capture resumes on reload and the
   timeline tolerates gaps, but expect to reopen it occasionally.
+
+## Staying up for months
+
+A rig left running for days used to go quiet with nothing to show for it: still
+recording, still on screen, no error — and unreachable until someone reloaded the page.
+Three separate things rot at that timescale, and each is now supervised on the rig itself.
+
+**Relay subscriptions.** Trystero sends its Nostr `REQ` once, when the room is joined. The
+websocket underneath it is reconnected when a relay drops us, but the subscription is not
+replayed onto the new socket — so the rig goes on announcing into relays that have stopped
+listening to it, and never hears the offer a viewer sends back. `src/lib/net/health.ts`
+watches for a relay that is open *now* on a socket we never subscribed through, and the rig
+rejoins the room when it sees one — which is what the reload was doing all along, minus the
+reload. Rejoining also happens when the network returns, and after fifteen quiet minutes,
+since a relay can fall silent in ways a socket check cannot see.
+
+**The camera.** Android takes the sensor away without telling the page: a doze cycle,
+another app, a notification. The track ends or mutes, frames stop, and nothing in the page
+ever asks for the camera again. The rig now reopens it when the track ends, when it stays
+muted for half a minute, or when it is recording and no frame has landed in a minute — and
+keeps retrying if `getUserMedia` fails, rather than showing one error and giving up. The
+torch is restored with the camera, so a reopen at 3am does not leave the plant in the dark.
+
+**The wake lock.** It was taken once and re-taken on tab switch. A release from anywhere
+else — a transient power-save state, a request that failed while the tab was hidden — was
+permanent. It is now re-acquired on a timer for as long as recording is wanted.
+
+On the viewer, a live track that goes `muted` while the data channel stays up (a frozen
+picture behind a connected badge) triggers the same rejoin the rest of its watchdog uses.

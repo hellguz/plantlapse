@@ -19,6 +19,7 @@ import {
 } from '@/lib/storage/archive'
 import { isPersisted, readClip, readFrame, requestPersistence } from '@/lib/storage/opfs'
 import { createRoom, type Channels } from '@/lib/net/room'
+import { watchRelays } from '@/lib/net/health'
 import type { ClipHeader, RigStatus, ViewerCommand } from '@/lib/net/protocol'
 import { getSettings, updateSettings, useSettings } from '@/lib/settings'
 import { asRotation, nextRotation } from '@/lib/utils'
@@ -26,6 +27,21 @@ import { asRotation, nextRotation } from '@/lib/utils'
 const STATUS_INTERVAL_MS = 2_000
 const STATS_INTERVAL_MS = 5_000
 const AUTOBAKE_INTERVAL_MS = 20_000
+/** How often the rig checks that its own room and camera are still alive. */
+const SUPERVISE_INTERVAL_MS = 15_000
+/**
+ * Rejoin even with healthy-looking relays after this long without a peer. A
+ * relay can go quiet in ways a socket check cannot see (an announce swallowed,
+ * a subscription dropped server-side), and a rejoin nobody needed costs one
+ * REQ on an already-open socket.
+ */
+const ROOM_QUIET_REJOIN_MS = 15 * 60_000
+/** Recording, but no frame has landed for this long: the camera is gone. */
+const CAPTURE_STALL_MS = 60_000
+/** A muted track can recover on its own; past this it will not. */
+const TRACK_MUTE_GRACE_MS = 30_000
+/** Wait before another getUserMedia after one failed. */
+const CAMERA_RETRY_MS = 10_000
 
 interface BatteryLike extends EventTarget {
   level: number
@@ -73,6 +89,13 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
   const [error, setError] = useState<string | null>(null)
   const [cameraReady, setCameraReady] = useState(false)
   const [stream, setStream] = useState<MediaStream | null>(null)
+  /**
+   * Bumping either of these rebuilds the thing it names, from scratch. They are
+   * how the supervisors below recover a dead camera or a deaf room without the
+   * page reload that used to be the only cure.
+   */
+  const [cameraEpoch, setCameraEpoch] = useState(0)
+  const [roomEpoch, setRoomEpoch] = useState(0)
 
   const streamRef = useRef<MediaStream | null>(null)
   const trackRef = useRef<MediaStreamTrack | null>(null)
@@ -82,6 +105,10 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
   const livePeersRef = useRef(new Set<string>())
   const batteryRef = useRef<BatteryLike | null>(null)
   const settingsRef = useRef(settings)
+  /** Survives a camera reopen, so a night-time torch comes back with it. */
+  const torchWantedRef = useRef(false)
+  const mutedSinceRef = useRef<number | null>(null)
+  const armedAtRef = useRef(0)
 
   const [baker] = useState(() => new Baker(setBake))
 
@@ -92,8 +119,11 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
 
   /* ---------------------------------------------------------------- camera */
 
+  const reopenCamera = useCallback(() => setCameraEpoch((n) => n + 1), [])
+
   useEffect(() => {
     let cancelled = false
+    let retry: number | null = null
 
     async function boot() {
       try {
@@ -106,6 +136,7 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
         }
         streamRef.current = res.stream
         trackRef.current = res.track
+        mutedSinceRef.current = null
         setTorchAvailable(res.torchAvailable)
         setTorchOn(false)
         setCaptureSize({ width: res.width, height: res.height })
@@ -114,18 +145,80 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
         if (!settingsRef.current.deviceId && res.deviceId) {
           updateSettings({ deviceId: res.deviceId })
         }
+        // A reopen in the small hours must come back with the light it had.
+        if (torchWantedRef.current && res.torchAvailable) {
+          if (await setTorch(res.track, true)) setTorchOn(true)
+        }
         setCameraReady(true)
         setError(null)
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Camera unavailable')
+        // Another app holding the camera, or a device that vanished mid-switch,
+        // is usually temporary — and giving up on it silently is the failure
+        // this rig cannot have. Keep asking.
+        if (!cancelled) retry = window.setTimeout(reopenCamera, CAMERA_RETRY_MS)
       }
     }
 
     void boot()
     return () => {
       cancelled = true
+      if (retry !== null) clearTimeout(retry)
     }
-  }, [settings.deviceId, videoRef])
+  }, [settings.deviceId, cameraEpoch, reopenCamera, videoRef])
+
+  /**
+   * Camera supervisor.
+   *
+   * Android takes the camera away for reasons the page never hears about: a
+   * dialer notification, a doze cycle, another app grabbing the sensor. The
+   * track ends or mutes, `captureFrame` quietly finds nothing to read, and the
+   * rig goes on reporting itself as recording — no error, no frames, a black
+   * live view. Nothing in the page ever asked for the camera again, which is
+   * why the fix used to be a reload.
+   */
+  useEffect(() => {
+    if (!cameraReady) return
+    const id = window.setInterval(() => {
+      const track = trackRef.current
+      const now = Date.now()
+
+      if (!track || track.readyState === 'ended') {
+        reopenCamera()
+        return
+      }
+
+      // A muted track is often momentary (a focus hunt, a rotation), so it gets
+      // a grace period rather than an immediate reopen.
+      if (track.muted) {
+        mutedSinceRef.current ??= now
+        if (now - mutedSinceRef.current > TRACK_MUTE_GRACE_MS) {
+          mutedSinceRef.current = null
+          reopenCamera()
+          return
+        }
+      } else {
+        mutedSinceRef.current = null
+      }
+
+      // The element can end up paused after a background/foreground cycle, and
+      // a paused element hands `createImageBitmap` the same frame forever.
+      const el = videoRef.current
+      if (el && stream) {
+        if (el.srcObject !== stream) el.srcObject = stream
+        if (el.paused) void el.play().catch(() => {})
+      }
+
+      // Last resort: recording, camera claims to be fine, no frame has landed
+      // in a minute. Something upstream is wedged — take the camera again.
+      const engine = engineRef.current
+      if (engine?.isRunning) {
+        const since = engine.lastFrameAt ?? armedAtRef.current
+        if (since && now - since > CAPTURE_STALL_MS) reopenCamera()
+      }
+    }, SUPERVISE_INTERVAL_MS)
+    return () => clearInterval(id)
+  }, [cameraReady, stream, reopenCamera, videoRef])
 
   /**
    * Bind the stream to whatever element is currently mounted. Doing this in
@@ -299,7 +392,10 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
         case 'setTorch': {
           if (trackRef.current) {
             const ok = await setTorch(trackRef.current, cmd.on)
-            if (ok) setTorchOn(cmd.on)
+            if (ok) {
+              torchWantedRef.current = cmd.on
+              setTorchOn(cmd.on)
+            }
           }
           break
         }
@@ -337,11 +433,22 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
     handleCommandRef.current = handleCommand
   }, [handleCommand])
 
+  const rejoin = useCallback(() => setRoomEpoch((n) => n + 1), [])
+
   useEffect(() => {
     const ch = createRoom(settings.secret)
     channelsRef.current = ch
+    const relays = watchRelays()
+    const joinedAt = Date.now()
+    let lastPeerAt = 0
+
+    // Peer ids do not survive a rejoin, so the previous room's live watchers
+    // must not either — otherwise `addStream` fires at ids nobody answers to.
+    const livePeers = livePeersRef.current
+    livePeers.clear()
 
     ch.room.onPeerJoin((id) => {
+      lastPeerAt = Date.now()
       setPeers((p) => [...new Set([...p, id])])
       void buildStatusRef.current().then((s) => ch.sendStatus(s, id))
     })
@@ -386,15 +493,52 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
 
     const id = window.setInterval(() => {
       if (!Object.keys(ch.room.getPeers()).length) return
+      lastPeerAt = Date.now()
       void buildStatusRef.current().then((s) => ch.sendStatus(s))
     }, STATUS_INTERVAL_MS)
 
+    /**
+     * Room supervisor — the half of the reconnect story the rig never had.
+     *
+     * The viewer already rejoins when it goes quiet; the rig sat in a room
+     * whose relay subscriptions had expired underneath it and waited for a
+     * knock it could no longer hear. Days of "still recording, unreachable"
+     * ended in a manual reload. Rejoining costs a REQ on sockets that are
+     * already open, so it is cheap enough to do on suspicion.
+     */
+    const supervisor = window.setInterval(() => {
+      if (channelsRef.current !== ch) return
+      const peers = Object.keys(ch.room.getPeers()).length
+      if (peers) return
+      const quietFor = Date.now() - (lastPeerAt || joinedAt)
+      if (relays.stale() || quietFor > ROOM_QUIET_REJOIN_MS) rejoin()
+    }, SUPERVISE_INTERVAL_MS)
+
+    // Two moments worth not waiting for the interval on: the network coming
+    // back, and the tab being looked at again.
+    const onWake = () => {
+      if (channelsRef.current !== ch) return
+      if (!Object.keys(ch.room.getPeers()).length) rejoin()
+    }
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') onWake()
+    }
+    window.addEventListener('online', onWake)
+    document.addEventListener('visibilitychange', onVisible)
+
     return () => {
       clearInterval(id)
+      clearInterval(supervisor)
+      window.removeEventListener('online', onWake)
+      document.removeEventListener('visibilitychange', onVisible)
       ch.leave()
       channelsRef.current = null
+      // Watchers belong to the room that is going away; leaving them on screen
+      // would have the header claiming an audience across a rejoin.
+      livePeers.clear()
+      setPeers([])
     }
-  }, [settings.secret])
+  }, [settings.secret, roomEpoch, rejoin])
 
   /* --------------------------------------------------------------- arming */
 
@@ -409,6 +553,7 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
     })
     engineRef.current.updateSettings(settingsRef.current)
     engineRef.current.start()
+    armedAtRef.current = Date.now()
     await wakeRef.current.enable()
     updateSettings({ capturing: true })
     setArmed(true)
@@ -446,7 +591,10 @@ export function useRig(videoRef: RefObject<HTMLVideoElement | null>): RigControl
     if (!trackRef.current) return
     const next = !torchOn
     const ok = await setTorch(trackRef.current, next)
-    if (ok) setTorchOn(next)
+    if (ok) {
+      torchWantedRef.current = next
+      setTorchOn(next)
+    }
   }, [torchOn])
 
   const selectCamera = useCallback((deviceId: string) => {
